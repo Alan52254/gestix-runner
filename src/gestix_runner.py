@@ -34,6 +34,7 @@ class SharedState:
         self.gesture = "None"
         self.gesture_ts = 0.0
         self.running = True
+        self.frame_info = None  # 最新的攝影機畫面以及附帶資訊
         self.lock = threading.Lock()
 
     def set_gesture(self, gesture):
@@ -56,6 +57,26 @@ class SharedState:
     def set_running(self, value):
         with self.lock:
             self.running = value
+
+    def set_camera_view(self, frame, raw_gesture, voted_gesture, fps_display):
+        with self.lock:
+            if frame is None:
+                self.frame_info = None
+                return
+            self.frame_info = {
+                "frame": frame.copy(),  # 避免主執行緒讀取時畫面被更新
+                "raw_gesture": raw_gesture,
+                "voted_gesture": voted_gesture,
+                "fps_display": fps_display,
+            }
+
+    def get_camera_view(self):
+        with self.lock:
+            if not self.frame_info:
+                return None
+            info = self.frame_info.copy()
+            info["frame"] = info["frame"].copy()
+            return info
 
 # ===== 3. Gesture Recognition Logic (升級演算法 + 描點) =====
 class HandGestureRecognizer:
@@ -100,7 +121,7 @@ class HandGestureRecognizer:
 
     def _is_wave(self, landmarks):
         # 揮手演算法保持不變，它已經足夠穩定了
-        self.wrist_hist.append(landmarks[0]) # 追蹤手腕座標
+        self.wrist_hist.append((landmarks[0].x, landmarks[0].y)) # 追蹤手腕座標
         if len(self.wrist_hist) < Config.WAVE_WINDOW: return False
         xs = [p[0] - np.mean([p[0] for p in self.wrist_hist]) for p in self.wrist_hist]
         sign_changes = np.sum(np.diff(np.sign(xs)) != 0)
@@ -202,16 +223,17 @@ def camera_thread(shared_state: SharedState):
                 fps_display = fps_cnt / (time.time() - fps_t0)
                 fps_cnt, fps_t0 = 0, time.time()
 
+            shared_state.set_camera_view(frame, raw_gesture, voted_gesture, fps_display)
+
             # 顯示更豐富的指標
-            cv2.putText(frame, f"FPS: {fps_display:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            cv2.putText(frame, f"Raw: {raw_gesture}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            cv2.putText(frame, f"Voted: {voted_gesture}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            cv2.imshow("GestiX Camera", frame)
+            # cv2.putText(frame, f"FPS: {fps_display:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            # cv2.putText(frame, f"Raw: {raw_gesture}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+            # cv2.putText(frame, f"Voted: {voted_gesture}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            # cv2.imshow("GestiX Camera", frame)
             # ---------------------------
 
-            if cv2.waitKey(1) & 0xFF == 27: # ESC
-                shared_state.set_running(False)
+            # if cv2.waitKey(1) & 0xFF == 27: # ESC
+            #     shared_state.set_running(False)
     
     except Exception as e:
         print(f"攝影機執行緒發生未預期錯誤: {e}")
@@ -337,7 +359,23 @@ class RunnerGame:
             self.update(dt)
             self.draw()
 
+            view = self.shared_state.get_camera_view()
+            if view is not None:
+                frame = view["frame"]
+                fps_display = view["fps_display"]
+                raw_gesture = view["raw_gesture"]
+                voted_gesture = view["voted_gesture"]
+
+                cv2.putText(frame, f"FPS: {fps_display:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(frame, f"Raw: {raw_gesture}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                cv2.putText(frame, f"Voted: {voted_gesture}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+                cv2.imshow("GestiX Camera", frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    self.shared_state.set_running(False)
+
         pygame.quit()
+        cv2.destroyAllWindows()
 
 # ===== 6. Main Execution =====
 def main():
