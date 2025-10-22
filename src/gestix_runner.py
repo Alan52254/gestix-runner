@@ -61,7 +61,7 @@ class SharedState:
     def set_camera_view(self,frame,fps_display,raw_gesture,voted_gesture):
         with self.lock:
             if frame is None:
-                self.frame_info=frame
+                self.frame_info=None
                 return
             self.frame_info={
                 "frame":frame.copy(),
@@ -360,22 +360,23 @@ class RunnerGame:
             self.update(dt)
             self.draw()
 
-            view=self.shared_state.frame_info()
-        if view is not None:
-            frame=view["frame"]
-            fps_display=view["fps_display"]
-            raw_gesture=view["raw_gesture"]
-            voted_gesture=view["voted_gesture"]
-            cv2.putText(frame, f"FPS: {fps_display:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            cv2.putText(frame, f"Raw: {raw_gesture}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            cv2.putText(frame, f"Voted: {voted_gesture}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.imshow("GestiX Camera", frame)
+            view=self.shared_state.get_camera_view()
+            if view is not None:
+                frame=view["frame"]
+                fps_display=view["fps_display"]
+                raw_gesture=view["raw_gesture"]
+                voted_gesture=view["voted_gesture"]
+                cv2.putText(frame, f"FPS: {fps_display:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                cv2.putText(frame, f"Raw: {raw_gesture}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                cv2.putText(frame, f"Voted: {voted_gesture}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.imshow("GestiX Camera", frame)
 
             if cv2.waitKey(1) & 0xFF == 27: # ESC
                 self.shared_state.set_running(False)
 
 
         pygame.quit()
+        cv2.destroyAllWindows()
 
 # ===== 6. Main Execution =====
 def main():
