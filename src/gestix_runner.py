@@ -1,354 +1,694 @@
-# gestix_runner.py (Python 3.10) - Refactored Version
+# gestix_runner_w1_final.py (Python 3.10+)
+# GestiX Runner — integrated single-file MVP with OK/Victory, validation, and robust state logic
+
 import threading
 import time
 import math
 import collections
+from collections import deque
 import numpy as np
 import cv2
 import mediapipe as mp
 import pygame
 
-# ===== 1. Constants & Configuration (集中管理，方便調整) =====
+# =========================
+# 1) Configuration
+# =========================
 class Config:
+    # Camera
     CAM_INDEX = 0
-    FRAME_W, FRAME_H = 640, 480
-    VOTE_FRAMES = 5
-    TRIGGER_COOLDOWN = 0.30   # seconds
-    WAVE_WINDOW = 8
-    JUMP_VELOCITY = -15
-    GRAVITY = 1
-    SLIDE_TIME = 0.6
-    OBST_SPEED = 6
-    # PyGame Colors
-    COLOR_WHITE = (245, 245, 245)
-    COLOR_GROUND = (220, 220, 220)
-    COLOR_PLAYER = (50, 120, 255)
-    COLOR_PLAYER_JUMP = (255, 120, 50)
-    COLOR_OBSTACLE = (40, 40, 40)
-    COLOR_TEXT = (30, 30, 30)
-    COLOR_PAUSED = (180, 0, 0)
+    CAM_W, CAM_H = 640, 360   # good balance for CPU FPS
 
-# ===== 2. Shared State (使用 dataclass 讓結構更清晰) =====
+    # Game
+    SCREEN_W, SCREEN_H = 800, 400
+    GAME_FPS = 60
+    SCROLL_SPEED = 5
+
+    # Physics
+    GRAVITY = 0.8
+    JUMP_VELOCITY = -15
+    SLIDE_TIME = 0.5  # s
+    BULLET_SPEED = 10
+    ENEMY_SPEED = 2
+
+    # Gestures / Debounce
+    MAX_HANDS = 2
+    VOTE_FRAMES = 5
+    TRIGGER_COOLDOWN = 0.25  # s
+    WAVE_WINDOW = 10         # frames for wrist x oscillation
+    WAVE_MIN_SWINGS = 2
+    WAVE_MIN_AMPLITUDE = 0.15
+
+    # Gesture mapping (clear separation of responsibilities)
+    GESTURE_MAPPING = {
+        "Fist": "START_GAME",      # only in START
+        "Open": "JUMP",
+        "Gun": "SHOOT",
+        "OK": "SPEED_UP",          # new
+        "Victory": "ULTI",         # new
+        "ThumbUp": "RESTART",      # only in GAME_OVER
+        "Wave": "PAUSE_TOGGLE",
+        "DualOpen": "ULTI"         # optional: both hands open also triggers ULTI
+    }
+    # One-shot (consumed) gestures
+    CONSUME_GESTURES = {"Open", "Gun", "OK", "Victory", "ThumbUp", "DualOpen"}
+
+    # Colors (placeholder block art)
+    COLOR_SKY = (135, 206, 235)
+    COLOR_GROUND = (124, 252, 0)
+    COLOR_BRICK = (184, 134, 11)
+    COLOR_PLAYER = (255, 0, 0)
+    COLOR_ENEMY = (139, 69, 19)
+    COLOR_COIN = (255, 215, 0)
+    COLOR_BULLET = (255, 140, 0)
+    COLOR_TEXT = (30, 30, 30)
+    COLOR_UI_PAUSED = (0, 0, 0, 160)
+
+
+# =========================
+# 2) Shared State
+# =========================
 class SharedState:
     def __init__(self):
-        self.gesture = "None"
-        self.gesture_ts = 0.0
-        self.running = True
-        self.lock = threading.Lock()
+        self._lock = threading.Lock()
+        self._running = True
+        self._gesture = "None"
+        self._gesture_ts = 0.0
+        self._camera_view = None
+        self._recognizer_ref = None  # for validation HUD
 
-    def set_gesture(self, gesture):
-        with self.lock:
+    # running
+    def set_running(self, val: bool):
+        with self._lock:
+            self._running = val
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._running
+
+    # gesture (debounced, consumed)
+    def set_gesture(self, gesture: str):
+        with self._lock:
             now = time.time()
-            if gesture != "None" and (now - self.gesture_ts >= Config.TRIGGER_COOLDOWN):
-                self.gesture = gesture
-                self.gesture_ts = now
+            if gesture != "None":
+                if gesture != self._gesture or (now - self._gesture_ts) >= Config.TRIGGER_COOLDOWN:
+                    self._gesture = gesture
+                    self._gesture_ts = now
 
-    def get_gesture(self):
-        with self.lock:
-            g = self.gesture
-            self.gesture = "None" # Consume gesture
+    def get_gesture(self) -> str:
+        with self._lock:
+            g = self._gesture
+            if g in Config.CONSUME_GESTURES:
+                self._gesture = "None"
             return g
 
-    def is_running(self):
-        with self.lock:
-            return self.running
+    # camera view bundle
+    def set_camera_view(self, frame, fps, raw_gestures, landmarks_data):
+        with self._lock:
+            self._camera_view = {
+                "frame": frame.copy(),
+                "fps": fps,
+                "raw_gestures": raw_gestures,
+                "landmarks": landmarks_data
+            }
 
-    def set_running(self, value):
-        with self.lock:
-            self.running = value
+    def get_camera_view(self):
+        with self._lock:
+            return self._camera_view.copy() if self._camera_view else None
 
-# ===== 3. Gesture Recognition Logic (升級演算法 + 描點) =====
+    # recognizer ref (for HUD of validation)
+    def set_recognizer_ref(self, recognizer):
+        with self._lock:
+            self._recognizer_ref = recognizer
+
+    def get_recognizer_ref(self):
+        with self._lock:
+            return self._recognizer_ref
+
+
+# =========================
+# 3) Gesture Recognition
+# =========================
 class HandGestureRecognizer:
     def __init__(self):
         self.mp_hands = mp.solutions.hands
-        self.mp_draw = mp.solutions.drawing_utils # <--- 新增：用於描點
+        self.mp_draw = mp.solutions.drawing_utils
         self.hands = self.mp_hands.Hands(
-            max_num_hands=1,
+            max_num_hands=Config.MAX_HANDS,
             model_complexity=0,
             min_detection_confidence=0.6,
             min_tracking_confidence=0.6
         )
-        self.gesture_queue = collections.deque(maxlen=Config.VOTE_FRAMES)
-        self.wrist_hist = collections.deque(maxlen=Config.WAVE_WINDOW)
-        
-        # --- 描點樣式 (來自您的參考程式碼) ---
-        self.hand_lms_style = self.mp_draw.DrawingSpec(color=(0, 0, 255), thickness=3)
-        self.hand_con_style = self.mp_draw.DrawingSpec(color=(0, 255, 0), thickness=5)
-        # ------------------------------------
-        
-        self.tip_ids = [4, 8, 12, 16, 20] # 5根手指的指尖 ID
+        self.hand_lms_style = self.mp_draw.DrawingSpec(color=(0, 0, 255), thickness=2)
+        self.hand_con_style = self.mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2)
 
-    def _dist(self, p1, p2):
-        return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+        self.tip_ids = [4, 8, 12, 16, 20]
+        self.gesture_queue = deque(maxlen=Config.VOTE_FRAMES)
 
-    def _get_finger_status(self, landmarks):
-        """
-        回傳一個陣列 [Thumb, Index, Middle, Ring, Pinky]，1=Up, 0=Down
-        """
-        fingers_up = [0] * 5
-        
-        # 處理大拇指 (唯一水平判斷的手指)
-        # 注意：影像已水平翻轉，所以 "左" <-> "右"
-        if landmarks[self.tip_ids[0]].x < landmarks[self.tip_ids[0] - 1].x:
-            fingers_up[0] = 1
-            
-        # 處理其他四根手指 (垂直判斷)
-        for i in range(1, 5):
-            if landmarks[self.tip_ids[i]].y < landmarks[self.tip_ids[i] - 2].y:
-                fingers_up[i] = 1
-        return fingers_up
+        # wave detection history (wrist x normalized)
+        self.wrist_hist = deque(maxlen=Config.WAVE_WINDOW)
 
-    def _is_wave(self, landmarks):
-        # 揮手演算法保持不變，它已經足夠穩定了
-        self.wrist_hist.append(landmarks[0]) # 追蹤手腕座標
-        if len(self.wrist_hist) < Config.WAVE_WINDOW: return False
-        xs = [p[0] - np.mean([p[0] for p in self.wrist_hist]) for p in self.wrist_hist]
+        # validation window for accuracy (20 frames)
+        self.accuracy_win = deque(maxlen=20)
+        self.expected_for_eval = None
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _dist2d(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    def _get_finger_status(self, lms, handedness: str):
+        """Return [thumb,index,middle,ring,pinky] up/down (1/0)."""
+        fingers = [0]*5
+        # thumb (horizontal)
+        if (handedness == "Right" and lms[self.tip_ids[0]].x < lms[self.tip_ids[0]-1].x) or \
+           (handedness == "Left"  and lms[self.tip_ids[0]].x > lms[self.tip_ids[0]-1].x):
+            fingers[0] = 1
+        # other fingers (vertical)
+        for i in range(1,5):
+            fingers[i] = 1 if lms[self.tip_ids[i]].y < lms[self.tip_ids[i]-2].y else 0
+        return fingers
+
+    def _is_gun(self, fingers):
+        # index up only (allow thumb up sometimes)
+        return (fingers[1] == 1) and (sum([fingers[2],fingers[3],fingers[4]]) == 0)
+
+    def _is_ok(self, lms, handedness: str):
+        # Thumb tip (4) close to index tip (8), others mostly folded
+        base = self._dist2d((lms[0].x,lms[0].y), (lms[9].x,lms[9].y)) + 1e-6
+        d48 = self._dist2d((lms[4].x,lms[4].y), (lms[8].x,lms[8].y)) / base
+        fingers = self._get_finger_status(lms, handedness)
+        return d48 < 0.35 and fingers[1] == 1 and sum(fingers[2:]) <= 1
+
+    def _is_victory(self, fingers):
+        # index + middle up, others down (allow thumb flexible)
+        return (fingers[1] == 1 and fingers[2] == 1 and fingers[3] == 0 and fingers[4] == 0)
+
+    def _single_hand_gesture(self, lms, handedness: str):
+        fingers = self._get_finger_status(lms, handedness)
+        if self._is_ok(lms, handedness):     return "OK"
+        if self._is_victory(fingers):        return "Victory"
+        if self._is_gun(fingers):            return "Gun"
+        if fingers == [1,0,0,0,0]:           return "ThumbUp"
+        if fingers == [0,0,0,0,0]:           return "Fist"
+        if fingers == [1,1,1,1,1]:           return "Open"
+        return "None"
+
+    def _update_wave(self, wrist_x_norm: float):
+        self.wrist_hist.append(wrist_x_norm)
+        if len(self.wrist_hist) < self.wrist_hist.maxlen:
+            return False
+        xs = np.array(self.wrist_hist)
+        xs = xs - xs.mean()
         sign_changes = np.sum(np.diff(np.sign(xs)) != 0)
-        amplitude = max(xs) - min(xs)
-        return sign_changes >= 2 and amplitude > 0.15 # 偵測到左右擺動
+        amplitude = xs.max() - xs.min()
+        return (sign_changes >= Config.WAVE_MIN_SWINGS) and (amplitude > Config.WAVE_MIN_AMPLITUDE)
 
+    # ---------- public ----------
     def recognize(self, frame_rgb):
-        """
-        辨識手勢，並回傳 (voted_gesture, raw_gesture, landmarks)
-        """
         res = self.hands.process(frame_rgb)
-        cur_raw = "None"
-        landmarks_list = None
-        
+        raw_g = {"Left": "None", "Right": "None"}
+        final_gesture = "None"
+        draw_lms = res.multi_hand_landmarks
+        landmarks_data = None
+        wave_flag = False
+
         if res.multi_hand_landmarks:
-            # 取得 21 個點的 (x, y) 座標
-            lm = res.multi_hand_landmarks[0]
-            landmarks_list = lm.landmark
-            
-            # --- 強化版演算法：手指計數 ---
-            fingers = self._get_finger_status(landmarks_list)
-            
-            if self._is_wave(landmarks_list):
-                cur_raw = "Wave"
-            elif fingers == [1, 0, 0, 0, 0]: # 只有大拇指
-                cur_raw = "ThumbUp"
-            elif fingers == [0, 0, 0, 0, 0]: # 0 根手指
-                cur_raw = "Fist"
-            elif fingers == [1, 1, 1, 1, 1]: # 5 根手指
-                cur_raw = "Open"
-            # ---------------------------------
-            
-        # 投票機制 (去抖動) 
-        self.gesture_queue.append(cur_raw)
-        voted = max(set(self.gesture_queue), key=self.gesture_queue.count)
-        
-        # 回傳 1.投票後的穩定手勢 2.原始辨識手勢 3.關鍵點(給描點用)
-        return voted, cur_raw, res.multi_hand_landmarks
+            landmarks_data = []
+            for i, hand_lms in enumerate(res.multi_hand_landmarks):
+                handed = res.multi_handedness[i].classification[0].label  # "Left"/"Right"
+                # for wave detection (use wrist x)
+                wrist = hand_lms.landmark[0]
+                wave_flag = wave_flag or self._update_wave(wrist.x)
+
+                # per hand gesture
+                g = self._single_hand_gesture(hand_lms.landmark, handed)
+                raw_g[handed] = g
+
+                # store 21 (x,y,z)
+                pts = [(lm.x, lm.y, lm.z) for lm in hand_lms.landmark]
+                landmarks_data.append({"handedness": handed, "landmarks": pts})
+
+            # combine hands
+            if raw_g["Left"] == "Open" and raw_g["Right"] == "Open":
+                final_gesture = "DualOpen"
+            elif wave_flag:
+                final_gesture = "Wave"
+            elif raw_g["Right"] != "None":
+                final_gesture = raw_g["Right"]
+            elif raw_g["Left"] != "None":
+                final_gesture = raw_g["Left"]
+
+        # vote & push to validation window
+        self.gesture_queue.append(final_gesture)
+        voted = max(set(self.gesture_queue), key=self.gesture_queue.count) if self.gesture_queue else "None"
+
+        if self.expected_for_eval is not None:
+            self.accuracy_win.append(1 if voted == self.expected_for_eval else 0)
+
+        return voted, raw_g, draw_lms, landmarks_data
 
     def draw_landmarks(self, frame, multi_hand_landmarks):
-        """
-        在影像上繪製關鍵點和骨架 (使用您參考程式碼的樣式)
-        """
         if multi_hand_landmarks:
             for hand_lms in multi_hand_landmarks:
                 self.mp_draw.draw_landmarks(
-                    frame, 
-                    hand_lms, 
-                    self.mp_hands.HAND_CONNECTIONS,
-                    self.hand_lms_style, 
-                    self.hand_con_style
+                    frame, hand_lms, self.mp_hands.HAND_CONNECTIONS,
+                    self.hand_lms_style, self.hand_con_style
                 )
         return frame
+
+    # Validation API
+    def set_expected_for_eval(self, gesture_name_or_none):
+        self.expected_for_eval = gesture_name_or_none
+        self.accuracy_win.clear()
+
+    def get_eval_stats(self):
+        """Returns (n, correct, acc or None) over the 20-frame window."""
+        n = len(self.accuracy_win)
+        c = sum(self.accuracy_win)
+        acc = (c/n*100.0) if n >= 20 else None
+        return n, c, acc
 
     def close(self):
         self.hands.close()
 
-# ===== 4. Camera Thread (加入 try...finally 強制釋放資源) =====
-def camera_thread(shared_state: SharedState):
+
+# =========================
+# 4) Camera Thread
+# =========================
+def camera_thread(shared: SharedState):
     recognizer = HandGestureRecognizer()
+    shared.set_recognizer_ref(recognizer)
+
     cap = cv2.VideoCapture(Config.CAM_INDEX)
-
     if not cap.isOpened():
-        print(f"錯誤：無法開啟索引為 {Config.CAM_INDEX} 的攝影機。")
-        print("請檢查：1. 攝影機是否被其他程式佔用？ 2. CAM_INDEX 是否正確？ 3. 系統是否已授權？")
-        shared_state.set_running(False)
+        print(f"[Camera] Cannot open camera index {Config.CAM_INDEX}")
+        shared.set_running(False)
         return
-    else:
-        print(f"攝影機 {Config.CAM_INDEX} 已成功開啟！")
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.FRAME_W)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.FRAME_H)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, Config.CAM_W)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, Config.CAM_H)
+
     fps_t0, fps_cnt, fps_display = time.time(), 0, 0.0
 
     try:
-        # ===== 這是主迴圈 =====
-        while shared_state.is_running():
+        while shared.is_running():
             ok, frame = cap.read()
             if not ok or frame is None:
-                print("警告：讀取攝影機影像失敗，可能中斷。")
-                time.sleep(0.5) # 稍作等待
-                continue # 跳過這一幀
+                time.sleep(0.02)
+                continue
 
-            frame = cv2.flip(frame, 1) # 翻轉成鏡像，符合直覺
+            frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # 1. 辨識手勢
-            voted_gesture, raw_gesture, landmarks = recognizer.recognize(rgb)
-            
-            # 2. 將辨識結果傳給遊戲
-            shared_state.set_gesture(voted_gesture)
 
-            # 3. 繪製骨架 (使用新方法)
-            frame = recognizer.draw_landmarks(frame, landmarks)
+            voted_g, raw_g, draw_lms, lmk_data = recognizer.recognize(rgb)
+            shared.set_gesture(voted_g)
 
-            # --- Debug Display (指標) ---
+            # (Optional) draw landmarks – disable for higher FPS if needed
+            frame_dbg = frame.copy()
+            frame_dbg = recognizer.draw_landmarks(frame_dbg, draw_lms)
+
+            # FPS
             fps_cnt += 1
-            if time.time() - fps_t0 >= 1.0:
-                fps_display = fps_cnt / (time.time() - fps_t0)
-                fps_cnt, fps_t0 = 0, time.time()
+            now = time.time()
+            if now - fps_t0 >= 1.0:
+                fps_display = fps_cnt / (now - fps_t0)
+                fps_cnt, fps_t0 = 0, now
 
-            # 顯示更豐富的指標
-            cv2.putText(frame, f"FPS: {fps_display:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            cv2.putText(frame, f"Raw: {raw_gesture}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-            cv2.putText(frame, f"Voted: {voted_gesture}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            
-            cv2.imshow("GestiX Camera", frame)
-            # ---------------------------
+            shared.set_camera_view(frame_dbg, fps_display, raw_g, lmk_data)
 
-            if cv2.waitKey(1) & 0xFF == 27: # ESC
-                shared_state.set_running(False)
-    
     except Exception as e:
-        print(f"攝影機執行緒發生未預期錯誤: {e}")
-        shared_state.set_running(False) # 通知主程式一起關閉
-
+        print(f"[Camera] Unexpected error: {e}")
     finally:
-        # ===== 這裡最關鍵 =====
-        # 無論迴圈如何結束 (正常結束或出錯)，都強制執行
-        print("正在釋放攝影機資源...")
         cap.release()
-        cv2.destroyAllWindows()
         recognizer.close()
-        print("攝影機資源已釋放。")
 
-# ===== 5. Game Logic (也封裝成類別) =====
-class RunnerGame:
-    def __init__(self, shared_state: SharedState):
-        pygame.init()
-        self.W, self.H = 800, 400
-        self.screen = pygame.display.set_mode((self.W, self.H))
-        pygame.display.set_caption("GestiX Runner")
-        self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont(None, 24)
-        self.shared_state = shared_state
-        self.reset()
 
-    def reset(self):
-        self.player = pygame.Rect(100, self.H - 120, 40, 60)
-        self.vy = 0
-        self.on_ground = True
-        self.sliding_until = 0
-        self.obstacles = []
-        self.spawn_timer = 0
-        self.score = 0
-        self.paused = True
+# =========================
+# 5) Game Sprites
+# =========================
+class Player(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.image = pygame.Surface((32, 32))
+        self.image.fill(Config.COLOR_PLAYER)
+        self.rect = self.image.get_rect(bottomleft=(x, y))
 
-    def spawn_obstacle(self):
-        h = np.random.randint(30, 60)
-        w = np.random.randint(20, 35)
-        rect = pygame.Rect(self.W, self.H - 60 - h, w, h)
-        self.obstacles.append(rect)
+        self.vel_y = 0
+        self.on_ground = False
+        self.is_sliding = False
+        self.slide_until = 0
 
-    def handle_gesture(self, g):
-        if g == "ThumbUp":
-            if self.paused: # 如果遊戲結束，重新開始
-                if not self.shared_state.is_running(): self.reset() # 簡易的重新開始邏輯
-            self.paused = not self.paused # 切換暫停狀態
-        
-        if self.paused: return
+        self.shoot_cooldown = 0  # in frames
 
-        if g == "Open" and self.on_ground:
-            self.vy = Config.JUMP_VELOCITY
+    def update(self, platforms):
+        # gravity
+        if not self.on_ground:
+            self.vel_y += Config.GRAVITY
+            self.rect.y += self.vel_y
+
+        # ground/platform collision
+        self.on_ground = False
+        collided = pygame.sprite.spritecollide(self, platforms, False)
+        for plat in collided:
+            if self.vel_y > 0:
+                self.rect.bottom = plat.rect.top
+                self.vel_y = 0
+                self.on_ground = True
+
+        # slide
+        if self.is_sliding and time.time() > self.slide_until:
+            self.is_sliding = False
+            # restore size
+            old_center = self.rect.center
+            self.image = pygame.Surface((32, 32))
+            self.image.fill(Config.COLOR_PLAYER)
+            self.rect = self.image.get_rect(center=old_center)
+
+        if self.shoot_cooldown > 0:
+            self.shoot_cooldown -= 1
+
+    def jump(self):
+        if self.on_ground:
+            self.vel_y = Config.JUMP_VELOCITY
             self.on_ground = False
-        elif g == "Fist":
-            self.sliding_until = time.time() + Config.SLIDE_TIME
-        elif g == "Wave":
-            self.paused = True
 
-    def update(self, dt):
-        if self.paused: return
+    def slide(self):
+        if self.on_ground and not self.is_sliding:
+            self.is_sliding = True
+            self.slide_until = time.time() + Config.SLIDE_TIME
+            # shrink bounding box (become shorter)
+            old_bottomleft = self.rect.bottomleft
+            self.image = pygame.Surface((32, 16))
+            self.image.fill(Config.COLOR_PLAYER)
+            self.rect = self.image.get_rect(bottomleft=old_bottomleft)
 
-        self.vy += Config.GRAVITY
-        self.player.y += self.vy
-        ground_y = self.H - 120
-        if self.player.y >= ground_y:
-            self.player.y = ground_y
-            self.vy = 0
-            self.on_ground = True
+    def shoot(self, bullets, all_sprites):
+        if self.shoot_cooldown <= 0:
+            b = Bullet(self.rect.right, self.rect.centery)
+            bullets.add(b)
+            all_sprites.add(b)
+            self.shoot_cooldown = int(0.5 * Config.GAME_FPS)  # 0.5s
 
-        self.player.height = 35 if time.time() < self.sliding_until else 60
 
-        self.spawn_timer += dt
-        if self.spawn_timer > np.random.uniform(900, 1500): # 隨機生成障礙物，增加趣味性
-            self.spawn_timer = 0
-            self.spawn_obstacle()
+class Platform(pygame.sprite.Sprite):
+    def __init__(self, x, y, w, h, is_brick=False):
+        super().__init__()
+        self.image = pygame.Surface((w, h))
+        self.image.fill(Config.COLOR_BRICK if is_brick else Config.COLOR_GROUND)
+        self.rect = self.image.get_rect(topleft=(x, y))
+        self.is_brick = is_brick
 
-        for obs in list(self.obstacles):
-            obs.x -= Config.OBST_SPEED
-            if obs.right < 0:
-                self.obstacles.remove(obs)
-                self.score += 1
-            if obs.colliderect(self.player):
-                self.paused = True # 遊戲結束
 
+class Enemy(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.image = pygame.Surface((32, 32))
+        self.image.fill(Config.COLOR_ENEMY)
+        self.rect = self.image.get_rect(bottomleft=(x, y))
+        self.speed = Config.ENEMY_SPEED
+
+    def update(self, *_):
+        self.rect.x -= self.speed
+
+
+class Coin(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.image = pygame.Surface((16, 16))
+        self.image.fill(Config.COLOR_COIN)
+        self.rect = self.image.get_rect(center=(x, y))
+
+
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, x, y):
+        super().__init__()
+        self.image = pygame.Surface((10, 10))
+        self.image.fill(Config.COLOR_BULLET)
+        self.rect = self.image.get_rect(center=(x, y))
+        self.speed = Config.BULLET_SPEED
+
+    def update(self, *_):
+        self.rect.x += self.speed
+        if self.rect.left > Config.SCREEN_W:
+            self.kill()
+
+
+# =========================
+# 6) Game Engine
+# =========================
+class GameEngine:
+    def __init__(self, shared: SharedState):
+        pygame.init()
+        self.screen = pygame.display.set_mode((Config.SCREEN_W, Config.SCREEN_H))
+        pygame.display.set_caption("GestiX Runner (W1 Final)")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont(None, 28)
+
+        self.shared = shared
+        self.recognizer = None  # will fetch from shared later
+
+        self.game_state = "START"  # START, PLAYING, PAUSED, GAME_OVER
+        self.speed_boost_until = 0
+
+        # groups
+        self.all_sprites = pygame.sprite.Group()
+        self.platforms = pygame.sprite.Group()
+        self.enemies = pygame.sprite.Group()
+        self.coins = pygame.sprite.Group()
+        self.bullets = pygame.sprite.Group()
+
+        self.reset_game()
+
+    def reset_game(self):
+        # clear groups
+        self.all_sprites.empty()
+        self.platforms.empty()
+        self.enemies.empty()
+        self.coins.empty()
+        self.bullets.empty()
+
+        # player
+        self.player = Player(50, Config.SCREEN_H - 50)
+        self.all_sprites.add(self.player)
+
+        # level blocks
+        for i in range(30):
+            p = Platform(i*50, Config.SCREEN_H - 40, 50, 40)
+            self.platforms.add(p)
+            self.all_sprites.add(p)
+
+        p = Platform(200, Config.SCREEN_H - 120, 100, 20)
+        self.platforms.add(p); self.all_sprites.add(p)
+
+        for cx in (225, 250, 275):
+            c = Coin(cx, Config.SCREEN_H - 150)
+            self.coins.add(c); self.all_sprites.add(c)
+
+        for ex in (400, 600):
+            e = Enemy(ex, Config.SCREEN_H - 40)
+            self.enemies.add(e); self.all_sprites.add(e)
+
+        self.score = 0
+        self.camera_offset_x = 0
+        self.game_state = "START"
+        self.speed_boost_until = 0
+
+        # set eval off by default; will turn on when starting
+        rec = self.shared.get_recognizer_ref()
+        if rec: rec.set_expected_for_eval(None)
+
+    # ---------- input ----------
+    def handle_input(self):
+        # gestures
+        gesture = self.shared.get_gesture()
+        action = Config.GESTURE_MAPPING.get(gesture, "NONE")
+
+        if self.game_state == "START":
+            if action == "START_GAME":  # Fist
+                self.game_state = "PLAYING"
+                rec = self.shared.get_recognizer_ref()
+                if rec: rec.set_expected_for_eval("Open")  # example: evaluate "Open"
+
+        elif self.game_state == "PLAYING":
+            if action == "JUMP":
+                self.player.jump()
+            elif action == "SHOOT":
+                self.player.shoot(self.bullets, self.all_sprites)
+            elif action == "SPEED_UP":
+                self.speed_boost_until = time.time() + 2.0
+            elif action == "ULTI":
+                # simple "clear screen"
+                for e in list(self.enemies):
+                    e.kill()
+            elif action == "PAUSE_TOGGLE":
+                self.game_state = "PAUSED"
+
+        elif self.game_state == "PAUSED":
+            if action == "PAUSE_TOGGLE":
+                self.game_state = "PLAYING"
+
+        elif self.game_state == "GAME_OVER":
+            if action == "RESTART":  # ThumbUp
+                self.reset_game()
+
+        # keyboard (debug)
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                self.shared.set_running(False)
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_ESCAPE:
+                    self.shared.set_running(False)
+                if e.key == pygame.K_v:
+                    self.print_validation_data()
+                if e.key == pygame.K_1:
+                    rec = self.shared.get_recognizer_ref()
+                    if rec: rec.set_expected_for_eval("Open")
+                if e.key == pygame.K_0:
+                    rec = self.shared.get_recognizer_ref()
+                    if rec: rec.set_expected_for_eval(None)
+
+    # ---------- update ----------
+    def update(self):
+        if self.game_state != "PLAYING":
+            return
+
+        # speed boost (OK gesture)
+        speed_multiplier = 1.5 if time.time() < self.speed_boost_until else 1.0
+
+        # update sprites
+        self.all_sprites.update(self.platforms)
+
+        # move enemies
+        for e in self.enemies:
+            e.update()
+
+        # bullets vs enemies
+        pygame.sprite.groupcollide(self.bullets, self.enemies, True, True)
+
+        # player vs coins
+        if pygame.sprite.spritecollide(self.player, self.coins, True):
+            self.score += 10
+
+        # player vs enemies
+        hits = pygame.sprite.spritecollide(self.player, self.enemies, False)
+        for enemy in hits:
+            if self.player.vel_y > 0 and self.player.rect.bottom < enemy.rect.centery:
+                enemy.kill(); self.score += 50; self.player.vel_y = -5
+            else:
+                self.game_state = "GAME_OVER"
+
+        # camera follow (simple)
+        target_scroll = self.player.rect.centerx - (Config.SCREEN_W / 3)
+        if target_scroll > self.camera_offset_x:
+            self.camera_offset_x = target_scroll * speed_multiplier
+
+        # fall out
+        if self.player.rect.top > Config.SCREEN_H:
+            self.game_state = "GAME_OVER"
+
+    # ---------- draw ----------
     def draw(self):
-        self.screen.fill(Config.COLOR_WHITE)
-        pygame.draw.rect(self.screen, Config.COLOR_GROUND, (0, self.H - 60, self.W, 60))
+        self.screen.fill(Config.COLOR_SKY)
 
-        color = Config.COLOR_PLAYER if self.on_ground else Config.COLOR_PLAYER_JUMP
-        pygame.draw.rect(self.screen, color, self.player, border_radius=6)
+        # draw sprites with camera offset
+        for spr in self.all_sprites:
+            self.screen.blit(spr.image, (spr.rect.x - self.camera_offset_x, spr.rect.y))
 
-        for obs in self.obstacles:
-            pygame.draw.rect(self.screen, Config.COLOR_OBSTACLE, obs, border_radius=4)
-
+        # HUD
         score_text = self.font.render(f"Score: {self.score}", True, Config.COLOR_TEXT)
-        fps_text = self.font.render(f"FPS: {self.clock.get_fps():.1f}", True, Config.COLOR_TEXT)
-        self.screen.blit(score_text, (10, 10))
-        self.screen.blit(fps_text, (10, 30))
-        
-        hint = "ThumbUp: Start/Pause | Open: Jump | Fist: Slide | Wave: Pause | ESC: Quit"
-        self.screen.blit(self.font.render(hint, True, Config.COLOR_TEXT), (10, 60))
+        self.screen.blit(score_text, (10, 8))
 
-        if self.paused:
-            pause_text = "GAME OVER. ThumbUp to RESTART" if self.score > 0 else "PAUSED. ThumbUp to START"
-            text_surf = self.font.render(pause_text, True, Config.COLOR_PAUSED)
-            text_rect = text_surf.get_rect(center=(self.W // 2, self.H // 2))
-            self.screen.blit(text_surf, text_rect)
+        fps_text = self.font.render(f"FPS: {self.clock.get_fps():.1f}", True, Config.COLOR_TEXT)
+        self.screen.blit(fps_text, (10, 32))
+
+        # validation HUD
+        rec = self.shared.get_recognizer_ref()
+        if rec and rec.expected_for_eval:
+            n, c, acc = rec.get_eval_stats()
+            msg = f"[Eval:{rec.expected_for_eval}] {c}/{n}" + (f" ({acc:.1f}%)" if acc is not None else "")
+            self.screen.blit(self.font.render(msg, True, Config.COLOR_TEXT), (10, 56))
+
+        # overlays
+        if self.game_state == "START":
+            overlay = pygame.Surface((Config.SCREEN_W, Config.SCREEN_H), pygame.SRCALPHA)
+            overlay.fill(Config.COLOR_UI_PAUSED)
+            self.screen.blit(overlay, (0,0))
+            t = self.font.render("Fist to START", True, (255,255,255))
+            self.screen.blit(t, t.get_rect(center=(Config.SCREEN_W/2, Config.SCREEN_H/2)))
+
+        elif self.game_state == "PAUSED":
+            overlay = pygame.Surface((Config.SCREEN_W, Config.SCREEN_H), pygame.SRCALPHA)
+            overlay.fill(Config.COLOR_UI_PAUSED)
+            self.screen.blit(overlay, (0,0))
+            t = self.font.render("PAUSED (Wave to Resume)", True, (255,255,255))
+            self.screen.blit(t, t.get_rect(center=(Config.SCREEN_W/2, Config.SCREEN_H/2)))
+
+        elif self.game_state == "GAME_OVER":
+            overlay = pygame.Surface((Config.SCREEN_W, Config.SCREEN_H), pygame.SRCALPHA)
+            overlay.fill((0,0,0,160))
+            self.screen.blit(overlay, (0,0))
+            t1 = self.font.render(f"GAME OVER! Score: {self.score}", True, (255,255,255))
+            self.screen.blit(t1, t1.get_rect(center=(Config.SCREEN_W/2, Config.SCREEN_H/2 - 20)))
+            t2 = self.font.render("ThumbUp to RESTART", True, (255,255,255))
+            self.screen.blit(t2, t2.get_rect(center=(Config.SCREEN_W/2, Config.SCREEN_H/2 + 20)))
 
         pygame.display.flip()
 
+    # ---------- validation print ----------
+    def print_validation_data(self):
+        cam = self.shared.get_camera_view()
+        if cam and cam["landmarks"]:
+            print("\n" + "="*60)
+            print(f"LANDMARKS @ {time.time()}")
+            for i, hand in enumerate(cam["landmarks"]):
+                print(f"Hand {i+1} ({hand['handedness']}):")
+                for j, (x,y,z) in enumerate(hand["landmarks"]):
+                    print(f"  LM{j:02d}  x={x:.4f}  y={y:.4f}  z={z:.4f}")
+            print("="*60 + "\n")
+        else:
+            print("[Validation] No landmark data available.")
+
+    # ---------- main loop ----------
     def run(self):
-        while self.shared_state.is_running():
-            dt = self.clock.tick(60)
+        while self.shared.is_running():
+            self.clock.tick(Config.GAME_FPS)
+            # fetch recognizer ref once ready
+            if self.recognizer is None:
+                self.recognizer = self.shared.get_recognizer_ref()
 
-            for e in pygame.event.get():
-                if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
-                    self.shared_state.set_running(False)
-            
-            gesture = self.shared_state.get_gesture()
-            if gesture != "None":
-                self.handle_gesture(gesture)
-
-            self.update(dt)
+            self.handle_input()
+            self.update()
             self.draw()
 
-        pygame.quit()
+            # show camera debug window (optional; reduce size)
+            cam = self.shared.get_camera_view()
+            if cam is not None:
+                frame = cam["frame"]
+                fps = cam["fps"]
+                raw = cam["raw_gestures"]
+                cv2.putText(frame, f"CamFPS:{fps:.1f}", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+                cv2.putText(frame, f"L:{raw['Left']}  R:{raw['Right']}", (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,0,0), 2)
+                small = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2))
+                cv2.imshow("GestiX Camera (Debug)", small)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    self.shared.set_running(False)
 
-# ===== 6. Main Execution =====
+        pygame.quit()
+        cv2.destroyAllWindows()
+
+
+# =========================
+# 7) Main
+# =========================
 def main():
-    shared_state = SharedState()
-    
-    cam_thread = threading.Thread(target=camera_thread, args=(shared_state,), daemon=True)
+    shared = SharedState()
+    cam_thread = threading.Thread(target=camera_thread, args=(shared,), daemon=True)
     cam_thread.start()
-    
-    game = RunnerGame(shared_state)
+
+    game = GameEngine(shared)
     game.run()
-    
+
     cam_thread.join()
     print("Program finished.")
 
