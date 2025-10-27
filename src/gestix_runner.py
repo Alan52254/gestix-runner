@@ -33,8 +33,8 @@ class Config:
 
     # Gestures / Debounce
     MAX_HANDS = 2
-    VOTE_FRAMES = 5
-    TRIGGER_COOLDOWN = 0.25  # s
+    VOTE_FRAMES = 2 #要及時跳調小反應加快
+    TRIGGER_COOLDOWN = 0.15  # s    ＃縮短再次觸發的等待時間
     WAVE_WINDOW = 10         # frames for wrist x oscillation
     WAVE_MIN_SWINGS = 2
     WAVE_MIN_AMPLITUDE = 0.15
@@ -401,9 +401,9 @@ class Platform(pygame.sprite.Sprite):
 
 
 class Enemy(pygame.sprite.Sprite):
-    def __init__(self, x, y):
+    def __init__(self, x, y,w=32,h=32):
         super().__init__()
-        self.image = pygame.Surface((32, 32))
+        self.image = pygame.Surface((w, h))
         self.image.fill(Config.COLOR_ENEMY)
         self.rect = self.image.get_rect(bottomleft=(x, y))
         self.speed = Config.ENEMY_SPEED
@@ -459,6 +459,7 @@ class GameEngine:
         self.bullets = pygame.sprite.Group()
 
         self.reset_game()
+        self.enemy_spawn_timer=0
 
     def reset_game(self):
         # clear groups
@@ -493,6 +494,7 @@ class GameEngine:
         self.camera_offset_x = 0
         self.game_state = "START"
         self.speed_boost_until = 0
+        self.enemy_spawn_timer=0
 
         # set eval off by default; will turn on when starting
         rec = self.shared.get_recognizer_ref()
@@ -549,7 +551,7 @@ class GameEngine:
                     if rec: rec.set_expected_for_eval(None)
 
     # ---------- update ----------
-    def update(self):
+    def update(self,dt):
         if self.game_state != "PLAYING":
             return
 
@@ -562,6 +564,15 @@ class GameEngine:
         # move enemies
         for e in self.enemies:
             e.update()
+
+        #random add enemy
+        self.enemy_spawn_timer+=dt
+        if self.enemy_spawn_timer > np.random.uniform(1200, 2000): # 隨機生成障礙物，增加趣味性
+            self.enemy_spawn_timer = 0
+            h = np.random.randint(30, 60)
+            w = np.random.randint(20, 35)
+            e = Enemy(Config.SCREEN_W,Config.SCREEN_H - 40, w, h)
+            self.enemies.add(e); self.all_sprites.add(e)
 
         # bullets vs enemies
         pygame.sprite.groupcollide(self.bullets, self.enemies, True, True)
@@ -652,13 +663,13 @@ class GameEngine:
     # ---------- main loop ----------
     def run(self):
         while self.shared.is_running():
-            self.clock.tick(Config.GAME_FPS)
+            dt=self.clock.tick(Config.GAME_FPS)
             # fetch recognizer ref once ready
             if self.recognizer is None:
                 self.recognizer = self.shared.get_recognizer_ref()
 
             self.handle_input()
-            self.update()
+            self.update(dt)
             self.draw()
 
             # show camera debug window (optional; reduce size)
