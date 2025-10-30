@@ -22,7 +22,7 @@ class Config:
     # Game
     SCREEN_W, SCREEN_H = 800, 400
     GAME_FPS = 60
-    SCROLL_SPEED = 5
+    SCROLL_SPEED = 3
 
     # Physics
     GRAVITY = 0.8
@@ -30,6 +30,7 @@ class Config:
     SLIDE_TIME = 0.5  # s
     BULLET_SPEED = 10
     ENEMY_SPEED = 2
+
 
     # Gestures / Debounce
     MAX_HANDS = 2
@@ -392,12 +393,18 @@ class Player(pygame.sprite.Sprite):
 
 
 class Platform(pygame.sprite.Sprite):
-    def __init__(self, x, y, w, h, is_brick=False):
+    def __init__(self, x, y, w, h, is_brick=False,is_ground=False):
         super().__init__()
         self.image = pygame.Surface((w, h))
         self.image.fill(Config.COLOR_BRICK if is_brick else Config.COLOR_GROUND)
         self.rect = self.image.get_rect(topleft=(x, y))
         self.is_brick = is_brick
+        self.is_ground=is_ground
+        self.speed=Config.SCROLL_SPEED
+    
+    def update(self, *_):
+        if not self.is_ground:
+            self.rect.x-=self.speed
 
 
 class Enemy(pygame.sprite.Sprite):
@@ -418,6 +425,10 @@ class Coin(pygame.sprite.Sprite):
         self.image = pygame.Surface((16, 16))
         self.image.fill(Config.COLOR_COIN)
         self.rect = self.image.get_rect(center=(x, y))
+        self.speed=Config.SCROLL_SPEED
+
+    def update(self, *_):
+        self.rect.x-=self.speed
 
 
 class Bullet(pygame.sprite.Sprite):
@@ -454,17 +465,20 @@ class GameEngine:
         # groups
         self.all_sprites = pygame.sprite.Group()
         self.platforms = pygame.sprite.Group()
+        self.grounds= pygame.sprite.Group()
         self.enemies = pygame.sprite.Group()
         self.coins = pygame.sprite.Group()
         self.bullets = pygame.sprite.Group()
 
         self.reset_game()
         self.enemy_spawn_timer=0
+        self.platform_spawn_timer=0
 
     def reset_game(self):
         # clear groups
         self.all_sprites.empty()
         self.platforms.empty()
+        self.grounds= pygame.sprite.Group()
         self.enemies.empty()
         self.coins.empty()
         self.bullets.empty()
@@ -475,11 +489,11 @@ class GameEngine:
 
         # level blocks
         for i in range(30):
-            p = Platform(i*50, Config.SCREEN_H - 40, 50, 40)
-            self.platforms.add(p)
-            self.all_sprites.add(p)
+            g = Platform(i*50, Config.SCREEN_H - 40, 50, 40,is_ground=True)
+            self.platforms.add(g)
+            self.all_sprites.add(g)
 
-        p = Platform(200, Config.SCREEN_H - 120, 100, 20)
+        p = Platform(200, Config.SCREEN_H - 120, 100, 20,is_brick=True)
         self.platforms.add(p); self.all_sprites.add(p)
 
         for cx in (225, 250, 275):
@@ -495,6 +509,7 @@ class GameEngine:
         self.game_state = "START"
         self.speed_boost_until = 0
         self.enemy_spawn_timer=0
+        self.platform_spawn_timer=0
 
         # set eval off by default; will turn on when starting
         rec = self.shared.get_recognizer_ref()
@@ -564,6 +579,14 @@ class GameEngine:
         # move enemies
         for e in self.enemies:
             e.update()
+        
+        # move platforms
+        for e in self.platforms:
+            e.update()
+
+        # move coins
+        for e in self.coins:
+            e.update()
 
         #random add enemy
         self.enemy_spawn_timer+=dt
@@ -573,6 +596,20 @@ class GameEngine:
             w = np.random.randint(20, 35)
             e = Enemy(Config.SCREEN_W,Config.SCREEN_H - 40, w, h)
             self.enemies.add(e); self.all_sprites.add(e)
+        
+        #random add platforms+coins
+        self.platform_spawn_timer+=dt
+        if self.platform_spawn_timer>np.random.uniform(2000,4000):
+            self.platform_spawn_timer = 0 
+            x = Config.SCREEN_W + np.random.randint(50, 200)
+            y = Config.SCREEN_H - np.random.randint(120, 180)
+            p=Platform(x,y,100,20,is_brick=True)
+            self.platforms.add(p); self.all_sprites.add(p)
+
+            for i in range(3):
+                c=Coin(x+i*20,y-30)
+                self.coins.add(c)
+                self.all_sprites.add(c)
 
         # bullets vs enemies
         pygame.sprite.groupcollide(self.bullets, self.enemies, True, True)
