@@ -1,0 +1,3 @@
+下載gamealphaversion然後點擊檔案內的My project 2.exe
+圓球代表金幣
+朝玩家走過來的是敵人，碰到會扣血
