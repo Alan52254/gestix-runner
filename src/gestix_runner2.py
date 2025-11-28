@@ -9,8 +9,9 @@ import pygame, random, time, math
 from collections import deque
 from threading import Thread
 from typing import Optional, Tuple, List
+import cv2
 
-from gestix_mediapipe import SharedState, Config, camera_thread
+from gestix_mediapipe2  import SharedState, Config, camera_thread
 
 # ------------------ CONFIG DEFAULTS ------------------
 def _ensure_config_defaults():
@@ -421,7 +422,8 @@ class Obstacle(pygame.sprite.Sprite):
         w = random.randint(50, 90)
         yb = ground_y - (220 + random.randint(0, 80)) if air else ground_y
         self.rect = pygame.Rect(x, yb - h, w, h)
-        self.speed = int(Config.SCROLL_SPEED * (1.0 + 0.22 * scale))
+        #self.speed = int(Config.SCROLL_SPEED * (1.0 + 0.22 * scale))
+        self.speed = Config.SCROLL_SPEED
         self.texture = pygame.Surface((w, h), pygame.SRCALPHA)
         self.texture.fill((40, 40, 50))
         pygame.draw.rect(self.texture, (60, 60, 75), (0, 0, w, h), 2)
@@ -594,8 +596,15 @@ class GameEngine:
         y_air = self.ground_y - 160
         x, y = self._safe_xy(y_ground, y_air)
         c = Coin(x, y)
-        self.coins.add(c)
-        self.all_sprites.add(c)
+        max_tries = 20
+        tries = 0
+        while any(c.rect.colliderect(ob.rect) for ob in self.obstacles) and tries < max_tries:
+            x, y = self._safe_xy(self.ground_y - 26, self.ground_y - 160)
+            c.rect.center = (x, y)
+            tries += 1
+        if tries<max_tries:
+            self.coins.add(c)
+            self.all_sprites.add(c)
 
     def spawn_gun_if_needed(self):
         now = time.time()
@@ -824,7 +833,31 @@ class GameEngine:
             self.update(dt)
             self.draw()
 
+            cam=self.shared.get_camera_view()
+            if cam is not None:
+                frame = cam["frame"]
+                fps = cam["fps"]
+                raw = cam["raw_gestures"]
+                txt_l = f"L:{raw.get('Left','None')}"
+                txt_r = f"R:{raw.get('Right','None')}"
+                cv2.putText(frame, f"CamFPS:{fps:.1f}", (8, 16),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+                cv2.putText(frame, txt_l, (8, 34),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1, cv2.LINE_AA)
+                cv2.putText(frame, txt_r, (72, 34),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 255), 1, cv2.LINE_AA)
+
+                # === Debug window (green skeleton) ===
+                #small = cv2.resize(frame, (320, 180))
+                small = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2))
+                cv2.imshow("GestiX Camera (Debug)", small)
+                # ESC 直接關閉整個系統
+                if cv2.waitKey(1) & 0xFF == 27:
+                    shared.set_running(False)
+                    break
+
         pygame.quit()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     shared = SharedState()

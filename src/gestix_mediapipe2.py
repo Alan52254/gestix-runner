@@ -171,9 +171,15 @@ class HandGestureRecognizer:
             fingers[i] = 1 if lms[self.tip_ids[i]].y < lms[self.tip_ids[i] - 2].y else 0
         return fingers
 
+    def _is_point1(self, fingers):
+        """
+        比 1：只有食指伸直，其它四指收起（允許拇指半開）
+        """
+        return fingers[1] == 1 and fingers[0] == 0 and fingers[2] == 0 and fingers[3] == 0 and fingers[4] == 0
+    
     def _is_gun(self, fingers):
         # 食指伸出，其他(中環小)收起；拇指可自由
-        return fingers[1] == 1 and (fingers[2] + fingers[3] + fingers[4]) == 0
+        return fingers[1] == 1 and fingers[0] == 1 and (fingers[2] + fingers[3] + fingers[4]) == 0
 
     def _is_ok(self, lms, handedness):
         base = self._dist2d((lms[0].x, lms[0].y), (lms[9].x, lms[9].y)) + 1e-6
@@ -183,13 +189,7 @@ class HandGestureRecognizer:
 
     def _is_victory(self, fingers):
         return fingers[1] == 1 and fingers[2] == 1 and fingers[3] == 0 and fingers[4] == 0
-
-    def _is_point1(self, fingers):
-        """
-        比 1：只有食指伸直，其它四指收起（允許拇指半開）
-        """
-        return fingers[1] == 1 and fingers[2] == 0 and fingers[3] == 0 and fingers[4] == 0
-
+    
     def _single_hand_gesture(self, lms, handedness: str):
         fingers = self._get_finger_status(lms, handedness)
         if self._is_ok(lms, handedness):
@@ -319,53 +319,53 @@ def camera_thread(shared: SharedState):
                 fps_disp = cnt / (now - t0)
                 cnt, t0 = 0, now
 
-            cv2.putText(
-                dbg,
-                f"CamFPS:{fps_disp:.1f}",
-                (8, 16),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                1,
-                cv2.LINE_AA,
-            )
-            txt_l = f"L:{raw.get('Left','None')}"
-            txt_r = f"R:{raw.get('Right','None')}"
-            cv2.putText(
-                dbg,
-                txt_l,
-                (8, 34),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 0),
-                1,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                dbg,
-                txt_r,
-                (72, 34),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 0, 255),
-                1,
-                cv2.LINE_AA,
-            )
-
             shared.set_camera_view(dbg, fps_disp, raw, lmk_data)
+            
+            # cv2.putText(
+            #     dbg,
+            #     f"CamFPS:{fps_disp:.1f}",
+            #     (8, 16),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.5,
+            #     (0, 255, 0),
+            #     1,
+            #     cv2.LINE_AA,
+            # )
+            # txt_l = f"L:{raw.get('Left','None')}"
+            # txt_r = f"R:{raw.get('Right','None')}"
+            # cv2.putText(
+            #     dbg,
+            #     txt_l,
+            #     (8, 34),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.55,
+            #     (255, 255, 0),
+            #     1,
+            #     cv2.LINE_AA,
+            # )
+            # cv2.putText(
+            #     dbg,
+            #     txt_r,
+            #     (72, 34),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.55,
+            #     (255, 0, 255),
+            #     1,
+            #     cv2.LINE_AA,
+            # )
 
-            small = cv2.resize(dbg, (320, 180))
-            cv2.imshow("GestiX Camera (Debug)", small)
-            if cv2.waitKey(1) & 0xFF == 27:
-                shared.set_running(False)
-                break
+            #small = cv2.resize(dbg, (320, 180))
+            #cv2.imshow("GestiX Camera (Debug)", small)
+            # if cv2.waitKey(1) & 0xFF == 27:
+            #     shared.set_running(False)
+            #     break
 
     except Exception as e:
         print(f"[Camera] Unexpected error: {e}")
     finally:
         cap.release()
         recog.close()
-        cv2.destroyAllWindows()
+        #cv2.destroyAllWindows()
 
 # =========================
 # 5) Standalone debug run
