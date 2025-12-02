@@ -1,8 +1,10 @@
 # gestix_mediapipe.py
-# MediaPipe gesture module for GestiX Dino+
-# - Gestures: Fist(START), Open(JUMP), Point1(PAUSE/RESUME), Gun(SHOOT), ThumbUp(RESTART), DualOpen(ULTI)
+# MediaPipe gesture module for GestiX Runner
+# - Gestures: Fist(START), Open(JUMP), Point1(PAUSE/RESUME), Gun(SHOOT),
+#             ThumbUp(RESTART), DualOpen(ULTI), OK/Victory 保留
 # - Right-hand priority, N-frame voting, trigger cooldown
-# - Debug camera window with green skeleton
+# - Debug camera window with skeleton
+# - 輸出 landmarks (21 x (x,y,z)) 供 validation/分析使用
 
 import time
 import math
@@ -13,9 +15,8 @@ import cv2
 import numpy as np
 import mediapipe as mp
 
-
 # =========================
-# 1) Configuration (shared with runner)
+# 1) Configuration
 # =========================
 class Config:
     # Camera
@@ -27,7 +28,7 @@ class Config:
     GAME_FPS = 60
     SCROLL_SPEED = 5
 
-    # Physics for runner
+    # Physics for runner（給 runner 用，不在這裡改邏輯）
     GRAVITY = 1.1
     JUMP_VELOCITY = -20
 
@@ -45,27 +46,28 @@ class Config:
     COLOR_TEXT = (20, 20, 20)
     COLOR_BULLET = (255, 140, 0)
 
-    # Background removal tolerance for runner (not used here)
+    # Background removal tolerance for runner (可不使用)
     BG_REMOVE_TOLERANCE = 45
 
     # Gesture voting & debounce
     MAX_HANDS = 2
-    VOTE_FRAMES = 3
-    TRIGGER_COOLDOWN = 0.12
+    VOTE_FRAMES = 2          # 反應更快：2 幀投票
+    TRIGGER_COOLDOWN = 0.12  # s
 
-    # Gesture mapping (runner 會以此解析)
+    # Gesture mapping（真正的動作 mapping 在 runner 裡可以覆蓋）
     GESTURE_MAPPING = {
         "Fist": "START_GAME",
         "Open": "JUMP",
         "Gun": "SHOOT",
-        "OK": "SPEED_UP",        # 保留；runner 目前可能不用
-        "Victory": "ULTI",       # 保留；runner 目前可能不用
+        "OK": "SPEED_UP",        # 保留
+        "Victory": "ULTI",       # 保留
         "ThumbUp": "RESTART",
-        "Point1": "PAUSE_TOGGLE",   # 這版用「比1」取代 Wave
-        "DualOpen": "ULTI",      # 保留；雙手張開
+        "Point1": "PAUSE_TOGGLE",
+        "DualOpen": "ULTI",
     }
-    CONSUME_GESTURES = {"Open", "Gun", "OK", "Victory", "ThumbUp", "DualOpen", "Point1"}
-
+    CONSUME_GESTURES = {
+        "Open", "Gun", "OK", "Victory", "ThumbUp", "DualOpen", "Point1"
+    }
 
 # =========================
 # 2) Shared State
@@ -79,6 +81,7 @@ class SharedState:
         self._camera_view = None
         self._recognizer_ref = None
 
+    # lifecycle
     def set_running(self, val: bool):
         with self._lock:
             self._running = val
@@ -87,8 +90,8 @@ class SharedState:
         with self._lock:
             return self._running
 
+    # gesture with cooldown & consume-on-read
     def set_gesture(self, gesture: str):
-        # 帶冷卻，避免抖動觸發
         with self._lock:
             now = time.time()
             if gesture != "None":
@@ -103,18 +106,21 @@ class SharedState:
                 self._gesture = "None"
             return g
 
-    def set_camera_view(self, frame, fps, raw_gestures):
+    # camera frame bundle
+    def set_camera_view(self, frame, fps, raw_gestures, landmarks_data=None):
         with self._lock:
             self._camera_view = {
                 "frame": frame.copy(),
                 "fps": fps,
                 "raw_gestures": dict(raw_gestures),
+                "landmarks": landmarks_data,  # List[{"handedness": str, "landmarks": [(x,y,z), ...]}] or None
             }
 
     def get_camera_view(self):
         with self._lock:
             return self._camera_view.copy() if self._camera_view else None
 
+    # recognizer reference (for HUD / validation)
     def set_recognizer_ref(self, recognizer):
         with self._lock:
             self._recognizer_ref = recognizer
@@ -122,7 +128,6 @@ class SharedState:
     def get_recognizer_ref(self):
         with self._lock:
             return self._recognizer_ref
-
 
 # =========================
 # 3) Gesture Recognizer
@@ -137,11 +142,15 @@ class HandGestureRecognizer:
             max_num_hands=Config.MAX_HANDS,
             model_complexity=0,
             min_detection_confidence=0.6,
-            min_tracking_confidence=0.6
+            min_tracking_confidence=0.6,
         )
 
         self.tip_ids = [4, 8, 12, 16, 20]
         self.vote = deque(maxlen=Config.VOTE_FRAMES)
+
+        # validation window（例如：20 幀裡面，有幾幀是正確手勢）
+        self.accuracy_win = deque(maxlen=20)
+        self.expected_for_eval = None
 
     @staticmethod
     def _dist2d(a, b):
@@ -155,7 +164,7 @@ class HandGestureRecognizer:
         # Thumb 橫向判斷
         if handedness == "Right":
             fingers[0] = 1 if lms[self.tip_ids[0]].x < lms[self.tip_ids[0] - 1].x else 0
-        else:  # Left
+        else:
             fingers[0] = 1 if lms[self.tip_ids[0]].x > lms[self.tip_ids[0] - 1].x else 0
         # 其餘四指：tip 高於 PIP 視為伸直
         for i in range(1, 5):
@@ -177,19 +186,26 @@ class HandGestureRecognizer:
 
     def _is_point1(self, fingers):
         """
-        比 1：只有食指伸直，其它四指收起（允許拇指半開，容忍度稍微放寬）
+        比 1：只有食指伸直，其它四指收起（允許拇指半開）
         """
         return fingers[1] == 1 and fingers[2] == 0 and fingers[3] == 0 and fingers[4] == 0
 
     def _single_hand_gesture(self, lms, handedness: str):
         fingers = self._get_finger_status(lms, handedness)
-        if self._is_ok(lms, handedness):  return "OK"
-        if self._is_victory(fingers):     return "Victory"
-        if self._is_gun(fingers):         return "Gun"
-        if self._is_point1(fingers):      return "Point1"
-        if fingers == [1, 0, 0, 0, 0]:    return "ThumbUp"
-        if fingers == [0, 0, 0, 0, 0]:    return "Fist"
-        if fingers == [1, 1, 1, 1, 1]:    return "Open"
+        if self._is_ok(lms, handedness):
+            return "OK"
+        if self._is_victory(fingers):
+            return "Victory"
+        if self._is_gun(fingers):
+            return "Gun"
+        if self._is_point1(fingers):
+            return "Point1"
+        if fingers == [1, 0, 0, 0, 0]:
+            return "ThumbUp"
+        if fingers == [0, 0, 0, 0, 0]:
+            return "Fist"
+        if fingers == [1, 1, 1, 1, 1]:
+            return "Open"
         return "None"
 
     def recognize(self, frame_rgb):
@@ -197,32 +213,40 @@ class HandGestureRecognizer:
         raw_g = {"Left": "None", "Right": "None"}
         final_gesture = "None"
         draw_lms = res.multi_hand_landmarks if res.multi_hand_landmarks else []
+        landmarks_data = None
 
         if res.multi_hand_landmarks:
-            # 右手優先
+            landmarks_data = []
             lr = []
             for i, hand_lms in enumerate(res.multi_hand_landmarks):
                 handed = res.multi_handedness[i].classification[0].label  # 'Left'/'Right'
                 lr.append((handed, hand_lms))
 
-            # 依 Right 優先排序
+            # 右手優先排序
             lr.sort(key=lambda x: 0 if x[0] == "Right" else 1)
 
             for handed, hand_lms in lr:
                 g = self._single_hand_gesture(hand_lms.landmark, handed)
                 raw_g[handed] = g
 
+                pts = [(lm.x, lm.y, lm.z) for lm in hand_lms.landmark]
+                landmarks_data.append({"handedness": handed, "landmarks": pts})
+
             # 雙手張開 -> DualOpen
             if raw_g["Left"] == "Open" and raw_g["Right"] == "Open":
                 final_gesture = "DualOpen"
             else:
-                # 右手優先
                 final_gesture = raw_g["Right"] if raw_g["Right"] != "None" else raw_g["Left"]
 
         # 投票穩定
         self.vote.append(final_gesture)
         voted = max(set(self.vote), key=self.vote.count) if self.vote else "None"
-        return voted, raw_g, draw_lms
+
+        # Validation window（若有設定 expected_for_eval，就計算準確率）
+        if self.expected_for_eval is not None:
+            self.accuracy_win.append(1 if voted == self.expected_for_eval else 0)
+
+        return voted, raw_g, draw_lms, landmarks_data
 
     def draw_landmarks(self, bgr_frame, lms_list):
         if not lms_list:
@@ -237,9 +261,23 @@ class HandGestureRecognizer:
             )
         return bgr_frame
 
+    # Validation API（給你做 18/20 幀 > 90% 那種測試用）
+    def set_expected_for_eval(self, gesture_name_or_none):
+        self.expected_for_eval = gesture_name_or_none
+        self.accuracy_win.clear()
+
+    def get_eval_stats(self):
+        """
+        Returns: (n, correct, acc or None) over last 20 frames.
+        acc 在 n >= 20 時才會有值。
+        """
+        n = len(self.accuracy_win)
+        c = sum(self.accuracy_win)
+        acc = (c / n * 100.0) if n >= self.accuracy_win.maxlen and n > 0 else None
+        return n, c, acc
+
     def close(self):
         self.hands.close()
-
 
 # =========================
 # 4) Camera Thread
@@ -269,10 +307,9 @@ def camera_thread(shared: SharedState):
             frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            voted, raw, draw_lms = recog.recognize(rgb)
+            voted, raw, draw_lms, lmk_data = recog.recognize(rgb)
             shared.set_gesture(voted)
 
-            # Debug overlay
             dbg = frame.copy()
             dbg = recog.draw_landmarks(dbg, draw_lms)
 
@@ -282,22 +319,43 @@ def camera_thread(shared: SharedState):
                 fps_disp = cnt / (now - t0)
                 cnt, t0 = 0, now
 
-            # Text overlays
+            cv2.putText(
+                dbg,
+                f"CamFPS:{fps_disp:.1f}",
+                (8, 16),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
             txt_l = f"L:{raw.get('Left','None')}"
             txt_r = f"R:{raw.get('Right','None')}"
-            cv2.putText(dbg, f"CamFPS:{fps_disp:.1f}", (8, 16),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
-            cv2.putText(dbg, txt_l, (8, 34),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1, cv2.LINE_AA)
-            cv2.putText(dbg, txt_r, (72, 34),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 0, 255), 1, cv2.LINE_AA)
+            cv2.putText(
+                dbg,
+                txt_l,
+                (8, 34),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 0),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                dbg,
+                txt_r,
+                (72, 34),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 0, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
-            shared.set_camera_view(dbg, fps_disp, raw)
+            shared.set_camera_view(dbg, fps_disp, raw, lmk_data)
 
-            # === Debug window (green skeleton) ===
             small = cv2.resize(dbg, (320, 180))
             cv2.imshow("GestiX Camera (Debug)", small)
-            # ESC 直接關閉整個系統
             if cv2.waitKey(1) & 0xFF == 27:
                 shared.set_running(False)
                 break
@@ -309,18 +367,15 @@ def camera_thread(shared: SharedState):
         recog.close()
         cv2.destroyAllWindows()
 
-
 # =========================
 # 5) Standalone debug run
 # =========================
 if __name__ == "__main__":
-    # 獨立測試：只跑攝影機+手勢偵測與視窗
     shared = SharedState()
     th = threading.Thread(target=camera_thread, args=(shared,), daemon=True)
     th.start()
     print("Running MediaPipe module... (Press ESC in camera window to exit)")
 
-    # 小型輪詢直到 camera_thread 關閉
     try:
         while shared.is_running():
             time.sleep(0.05)
