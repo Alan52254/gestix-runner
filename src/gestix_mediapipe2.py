@@ -342,6 +342,23 @@ class HandGestureRecognizer:
         acc = (c / n * 100.0) if n >= self.accuracy_win.maxlen and n > 0 else None
         return n, c, acc
 
+    def get_acc(self):
+        """
+        根據最近 self.vote 計算「目前手勢的穩定度」：
+        - current: 最新一幀的投票結果（self.vote[-1]）
+        - n: 視窗內總幀數
+        - correct: 其中有幾幀跟 current 一樣
+        - acc: 百分比（n > 0 時才有值） correct / n
+        """
+        if not self.vote:
+            return 0, "None", 0, None
+
+        current = self.vote[-1]         
+        n = len(self.vote)
+        correct = sum(1 for g in self.vote if g == current)
+        acc = (correct / n * 100.0) if n > 0 else None
+        return n, current, correct, acc   
+
     def close(self):
         self.hands.close()
 
@@ -392,54 +409,54 @@ def camera_thread(shared: SharedState):
             if now - t0 >= 1.0:
                 fps_disp = cnt / (now - t0)
                 cnt, t0 = 0, now
-
-            cv2.putText(
-                dbg,
-                f"CamFPS:{fps_disp:.1f}",
-                (8, 16),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                1,
-                cv2.LINE_AA,
-            )
-            txt_l = f"L:{raw.get('Left', 'None')}"
-            txt_r = f"R:{raw.get('Right', 'None')}"
-            cv2.putText(
-                dbg,
-                txt_l,
-                (8, 34),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 0),
-                1,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                dbg,
-                txt_r,
-                (72, 34),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 0, 255),
-                1,
-                cv2.LINE_AA,
-            )
-
             shared.set_camera_view(dbg, fps_disp, raw, lmk_data)
+            # cv2.putText(
+            #     dbg,
+            #     f"CamFPS:{fps_disp:.1f}",
+            #     (8, 16),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.5,
+            #     (0, 255, 0),
+            #     1,
+            #     cv2.LINE_AA,
+            # )
+            # txt_l = f"L:{raw.get('Left', 'None')}"
+            # txt_r = f"R:{raw.get('Right', 'None')}"
+            # cv2.putText(
+            #     dbg,
+            #     txt_l,
+            #     (8, 34),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.55,
+            #     (255, 255, 0),
+            #     1,
+            #     cv2.LINE_AA,
+            # )
+            # cv2.putText(
+            #     dbg,
+            #     txt_r,
+            #     (72, 34),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.55,
+            #     (255, 0, 255),
+            #     1,
+            #     cv2.LINE_AA,
+            # )
 
-            small = cv2.resize(dbg, (320, 180))
-            cv2.imshow("GestiX Camera (Debug)", small)
-            if cv2.waitKey(1) & 0xFF == 27:
-                shared.set_running(False)
-                break
+            # shared.set_camera_view(dbg, fps_disp, raw, lmk_data)
+
+            # small = cv2.resize(dbg, (320, 180))
+            # cv2.imshow("GestiX Camera (Debug)", small)
+            # if cv2.waitKey(1) & 0xFF == 27:
+            #     shared.set_running(False)
+            #     break
 
     except Exception as e:
         print(f"[Camera] Unexpected error: {e}")
     finally:
         cap.release()
         recog.close()
-        cv2.destroyAllWindows()
+        #cv2.destroyAllWindows()
 
 
 # =========================

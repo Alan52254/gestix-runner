@@ -15,7 +15,7 @@
 #   (8) Boss 房專用護盾時間 Config.BOSS_ULTI_DURATION
 #   (9) Boss 房專用回血補包間隔 Config.HEAL_PACK_INTERVAL
 
-import pygame, random, time, math
+import pygame, random, time, math,cv2
 from collections import deque
 from threading import Thread
 from typing import Optional, Tuple, List
@@ -49,6 +49,8 @@ def _ensure_config_defaults():
         ULTI_DURATION=10.0,
         BOSS_ULTI_DURATION=6.0,   # ★ BOSS 房專用大招時間（秒）
         COIN_ENERGY_GAIN=10,
+        BOSS_SCORE_STEP=1000,   
+        MAX_BOSS_PHASE=5,       
         # Boss 房回血補包生成間隔（秒）
         HEAL_PACK_INTERVAL=6.0,
         # 苦無生成（原世界拾取物）間隔（秒）→ 縮短
@@ -557,6 +559,7 @@ class GameEngine:
         self.portal_fx = None
         self._portal_spawn_ts = 0.0
         self._boss_triggered = False
+        self.boss_phase=0
 
     def difficulty(self):
         return min(3.0, (time.time() - self.start_time) / 28.0)
@@ -719,10 +722,14 @@ class GameEngine:
             self._handle_collisions()
 
             # Score gate & Portal
-            if HAS_BOSS and (not self._boss_triggered) and self.score >= 1000:
-                if self.portal_fx is None:
-                    self.portal_fx = PortalFX(Config.SCREEN_W - 120, self.ground_y - 60)
-                    self._portal_spawn_ts = time.time()
+            if HAS_BOSS and (not self._boss_triggered):
+                # 每階段需要的分數：phase0→1000, phase1→2000...
+                target_score = getattr(Config, "BOSS_SCORE_STEP", 1000) * (self.boss_phase + 1)
+
+                if self.boss_phase < getattr(Config, "MAX_BOSS_PHASE", 5) and self.score >= target_score:
+                    if self.portal_fx is None:
+                        self.portal_fx = PortalFX(Config.SCREEN_W - 120, self.ground_y - 60)
+                        self._portal_spawn_ts = time.time()
 
             if self.portal_fx is not None:
                 dx = abs(self.player.rect.centerx - self.portal_fx.x)
@@ -765,6 +772,7 @@ class GameEngine:
                 self.game_state = "PLAYING"
                 self.portal_fx = None
                 self._portal_spawn_ts = 0.0
+                self.boss_phase+=1 # boss_phase 增加 下一次進入boss room 門檻提高1000 防止重複進入
                 self._boss_triggered = False
 
     def _draw_ground_pretty(self):
@@ -958,7 +966,25 @@ class GameEngine:
             self.update(dt)
             self.draw()
 
+            # show camera debug window (optional; reduce size)
+            cam = self.shared.get_camera_view()
+            if cam is not None:
+                frame = cam["frame"]
+                fps = cam["fps"]
+                raw = cam["raw_gestures"]
+                cv2.putText(frame, f"CamFPS:{fps:.1f}", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+                cv2.putText(frame, f"L:{raw['Left']}  R:{raw['Right']}", (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,0,0), 2)
+                recog = self.shared.get_recognizer_ref()    #取得目前手勢 算穩定度
+                if recog is not None:
+                    n, cur_g, correct, acc = recog.get_acc()
+                    cv2.putText(frame, f"Acc({cur_g}): {acc:.1f}% ({correct}/{n})", (10, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+                small = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2))
+                cv2.imshow("GestiX Camera (Debug)", small)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    self.shared.set_running(False)
+
         pygame.quit()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     shared = SharedState()
