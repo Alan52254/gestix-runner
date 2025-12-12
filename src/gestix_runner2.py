@@ -15,18 +15,20 @@
 #   (8) Boss 房專用護盾時間 Config.BOSS_ULTI_DURATION
 #   (9) Boss 房專用回血補包間隔 Config.HEAL_PACK_INTERVAL
 
-import pygame, random, time, math
+import pygame, random, time, math, cv2
 from collections import deque
 from threading import Thread
 from typing import Optional, Tuple, List
 
 from gestix_mediapipe2 import SharedState, Config, camera_thread
-
+from intro_screen import run_intro  # ★ 新增
+from boss_room2 import BossRoom2
 try:
     from boss_room import BossRoom
     HAS_BOSS = True
 except Exception:
     HAS_BOSS = False
+
 
 # ------------------ CONFIG DEFAULTS ------------------
 def _ensure_config_defaults():
@@ -49,6 +51,8 @@ def _ensure_config_defaults():
         ULTI_DURATION=10.0,
         BOSS_ULTI_DURATION=6.0,   # ★ BOSS 房專用大招時間（秒）
         COIN_ENERGY_GAIN=10,
+        BOSS_SCORE_STEP=1000,
+        MAX_BOSS_PHASE=5,
         # Boss 房回血補包生成間隔（秒）
         HEAL_PACK_INTERVAL=6.0,
         # 苦無生成（原世界拾取物）間隔（秒）→ 縮短
@@ -66,11 +70,11 @@ def _ensure_config_defaults():
             "Fist": "START_GAME",
             "Open": "JUMP",
             "Point1": "PAUSE_TOGGLE",
-            "Gun": "SHOOT",      # 名稱仍保留，但行為永遠丟苦無
-            "ThumbUp": "RESTART",
+            "Gun": "SHOOT",
+            "ThumbUp": "PAUSE_TOGGLE",   # ★ ThumbUp 也能暫停/繼續
             "Victory": "JUMP",
             "OK": "NONE",
-            "DualOpen": "ULTI",  # 開護盾
+            "DualOpen": "ULTI",
         },
         # 玩家 HP
         MAX_HP=100,
@@ -80,6 +84,7 @@ def _ensure_config_defaults():
             setattr(Config, k, v)
 
 _ensure_config_defaults()
+
 
 # ------------------ ASSET GENERATORS ------------------
 def create_gradient_surface(w, h, c1, c2):
@@ -103,6 +108,7 @@ def create_soft_cloud(radius, color):
     pygame.draw.circle(surf, (*color, 180), (int(radius * 1.8), int(radius * 0.8)), int(radius * 0.8))
     pygame.draw.circle(surf, (*color, 180), (int(radius * 1.5), int(radius * 1.1)), int(radius * 0.7))
     return surf
+
 
 # ------------------ VISUAL LAYERS ------------------
 class ParallaxLayer:
@@ -132,6 +138,7 @@ class ParallaxLayer:
         for item in self.items:
             surf.blit(item["surf"], (int(item["x"]), int(item["y"])))
 
+
 # ------------------ HELPERS ------------------
 def rect_center(rect: pygame.Rect) -> Tuple[int, int]:
     return rect.centerx, rect.centery
@@ -159,6 +166,7 @@ def _push_right_until_safe(r: pygame.Rect, others: List[pygame.Rect], pad: int, 
         r.x += step
         tries += 1
     return r
+
 
 # ------------------ PARTICLES & EFFECTS ------------------
 class Particle:
@@ -210,6 +218,7 @@ class PortalFX:
         pygame.draw.circle(glow, (80, 160, 255, 70), (r + 12, r + 12), r + 10)
         surf.blit(glow, (int(self.x - r - 12), int(self.y - r - 12)), special_flags=pygame.BLEND_ADD)
 
+
 # ------------------ ENTITIES ------------------
 class Player(pygame.sprite.Sprite):
     def __init__(self, x, ground_y):
@@ -224,6 +233,7 @@ class Player(pygame.sprite.Sprite):
         self.horizontal_boost = 0.0
         self.base_x = x
         self.max_forward = 190
+
         # 舊槍系統變數保留但不使用
         self.has_gun = False
         self.bullets_left = 0
@@ -240,6 +250,9 @@ class Player(pygame.sprite.Sprite):
         self.kunai_max = getattr(Config, "KUNAI_MAX_STACK", 10)
         self.kunai_count = self.kunai_stack  # 別名相容
 
+        # 會在 GameEngine.update() 鏡射
+        self.shield_on = False
+
     def _push_trail(self):
         self.trail.append((self.rect.copy(), time.time()))
 
@@ -255,17 +268,16 @@ class Player(pygame.sprite.Sprite):
             surf.blit(ghost, r.topleft)
 
         x, y, w, h = self.rect
-        # 陰影
-        sh = pygame.Surface((max(50, w//2), 12), pygame.SRCALPHA)
-        pygame.draw.ellipse(sh, (0, 0, 0, 95), (0, 0, max(50, w//2), 12))
-        surf.blit(sh, (self.rect.centerx - max(25, w//4), self.rect.bottom - 6))
 
-        # 簡化忍者造型
+        sh = pygame.Surface((max(50, w // 2), 12), pygame.SRCALPHA)
+        pygame.draw.ellipse(sh, (0, 0, 0, 95), (0, 0, max(50, w // 2), 12))
+        surf.blit(sh, (self.rect.centerx - max(25, w // 4), self.rect.bottom - 6))
+
         t = time.time()
         flutter = int(6 * math.sin(t * 10))
         pygame.draw.polygon(surf, (220, 50, 60), [(x + 12, y + 20), (x - 22, y + 15 + flutter), (x - 6, y + 26 + flutter)])
         pygame.draw.rect(surf, (24, 26, 36), (x + 14, y + 4, w - 28, 24), border_radius=6)
-        pygame.draw.rect(surf, (230, 235, 255), (x + w//2 - 10, y + 10, 20, 5))
+        pygame.draw.rect(surf, (230, 235, 255), (x + w // 2 - 10, y + 10, 20, 5))
         pygame.draw.rect(surf, (28, 30, 44), (x + 6, y + 30, 18, 12), border_radius=6)
         pygame.draw.rect(surf, (28, 30, 44), (x + w - 24, y + 30, 18, 12), border_radius=6)
         torso_rect = (x + 8, y + 40, w - 16, 44)
@@ -286,7 +298,6 @@ class Player(pygame.sprite.Sprite):
     def update(self, dt_ms, ground_y, state, particles: List['Particle']):
         self.prev_rect = self.rect.copy()
 
-        # 允許 PLAYING 與 BOSS_ROOM 狀態都更新（修正進房飄浮）
         if state not in ("PLAYING", "BOSS_ROOM"):
             return
 
@@ -301,7 +312,6 @@ class Player(pygame.sprite.Sprite):
         if self.rect.bottom >= ground_y:
             self.rect.bottom = ground_y
             if not self.on_ground and state == "PLAYING":
-                # 降落煙塵效果只在原世界觸發，避免房內干擾
                 spawn_landing_dust(particles, self.rect.centerx, ground_y - 3)
                 self.air_jumps_left = 1
             self.vel_y = 0.0
@@ -328,7 +338,6 @@ class Player(pygame.sprite.Sprite):
             self.horizontal_boost = 6.2
             self.air_jumps_left -= 1
 
-    # 固定丟苦無
     def shoot_kunai(self, bullets, all_sprites):
         now = time.time()
         if self.kunai_stack <= 0:
@@ -337,7 +346,6 @@ class Player(pygame.sprite.Sprite):
             return
         k = Kunai(self.rect.right + 8, self.rect.centery)
         bullets.add(k)
-        # all_sprites 只有原世界用到，這裡兼容傳入即可
         if all_sprites is not None:
             all_sprites.add(k)
         self._last_kunai_ts = now
@@ -351,34 +359,38 @@ class Player(pygame.sprite.Sprite):
         self.air_jumps_left = 1
         self.horizontal_boost = max(self.horizontal_boost * 0.6, 0.0)
 
-# 苦無投擲物（尺寸加大，與 boss_room 一致）
+
 class Kunai(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
         self.rect = pygame.Rect(x, y - 6, 36, 12)  # 36x12
         self.speed = Config.BULLET_SPEED
+
     def update(self, _):
         self.rect.x += self.speed
         if self.rect.left > Config.SCREEN_W + 60:
             self.kill()
+
     def draw(self, surf):
         x, y, w, h = self.rect
         blade = pygame.Surface((w + 12, h + 8), pygame.SRCALPHA)
-        pygame.draw.polygon(blade, (210, 210, 220), [(0, h//2+4), (18, 0), (18, h+8)])
+        pygame.draw.polygon(blade, (210, 210, 220), [(0, h // 2 + 4), (18, 0), (18, h + 8)])
         pygame.draw.rect(blade, (70, 70, 90), (18, 2, w - 10, h + 4), border_radius=3)
         surf.blit(blade, (x - 6, y - 4))
 
-# 原世界「苦無道具」（發光 & 星芒）
+
 class KunaiPickup(pygame.sprite.Sprite):
     def __init__(self, x, y):
         super().__init__()
         self.rect = pygame.Rect(0, 0, 26, 10)
         self.rect.center = (x, y)
         self.speed = Config.SCROLL_SPEED
+
     def update(self, _):
         self.rect.x -= self.speed
         if self.rect.right < -40:
             self.kill()
+
     def draw(self, surf):
         x, y, w, h = self.rect
         t = time.time()
@@ -387,6 +399,7 @@ class KunaiPickup(pygame.sprite.Sprite):
         for r, alpha in [(30, 65), (22, 95), (16, 120), (10, 150)]:
             pygame.draw.circle(glow, (255, 230, 160, alpha), (cx, cy), r)
         surf.blit(glow, (x - 28, y - 28), special_flags=pygame.BLEND_ADD)
+
         twinkle = pygame.Surface((70, 70), pygame.SRCALPHA)
         pygame.draw.line(twinkle, (255, 245, 220, 110), (35, 0), (35, 70), 2)
         pygame.draw.line(twinkle, (255, 245, 220, 110), (0, 35), (70, 35), 2)
@@ -394,10 +407,12 @@ class KunaiPickup(pygame.sprite.Sprite):
         twinkle = pygame.transform.rotozoom(twinkle, ang, 1.0)
         rect = twinkle.get_rect(center=(x + w // 2, y + h // 2))
         surf.blit(twinkle, rect.topleft, special_flags=pygame.BLEND_ADD)
+
         blade = pygame.Surface((w + 8, h + 6), pygame.SRCALPHA)
         pygame.draw.polygon(blade, (220, 220, 230), [(0, h // 2 + 3), (14, 0), (14, h + 6)])
         pygame.draw.rect(blade, (60, 60, 80), (14, 2, w - 6, h + 2), border_radius=2)
         surf.blit(blade, (x - 4, y - 3))
+
 
 class Coin(pygame.sprite.Sprite):
     def __init__(self, x, y):
@@ -406,11 +421,13 @@ class Coin(pygame.sprite.Sprite):
         self.rect.center = (x, y)
         self.speed = Config.SCROLL_SPEED
         self.anim = 0.0
+
     def update(self, _):
         self.rect.x -= self.speed
         if self.rect.right < -40:
             self.kill()
         self.anim += 0.1
+
     def draw(self, surf):
         cx, cy = self.rect.center
         glow_size = 40 + int(5 * math.sin(self.anim))
@@ -419,6 +436,7 @@ class Coin(pygame.sprite.Sprite):
         surf.blit(glow, (cx - glow_size // 2, cy - glow_size // 2), special_flags=pygame.BLEND_ADD)
         pygame.draw.circle(surf, (200, 240, 255), (cx, cy), 12, 2)
         pygame.draw.circle(surf, (255, 255, 255), (cx, cy), 7)
+
 
 class Obstacle(pygame.sprite.Sprite):
     def __init__(self, x, ground_y, air, scale):
@@ -435,12 +453,15 @@ class Obstacle(pygame.sprite.Sprite):
             rx, ry = random.randint(10, w - 10), random.randint(10, h - 10)
             rw, rh = random.randint(4, 10), random.randint(4, 20)
             pygame.draw.rect(self.texture, (30, 30, 35), (rx, ry, rw, rh))
+
     def update(self, _):
         self.rect.x -= self.speed
         if self.rect.right < -60:
             self.kill()
+
     def draw(self, surf):
         surf.blit(self.texture, self.rect.topleft)
+
 
 class Silhouette(pygame.sprite.Sprite):
     def __init__(self, kind, x, ground_y, speed):
@@ -460,11 +481,14 @@ class Silhouette(pygame.sprite.Sprite):
             pygame.draw.rect(self.image, col, (70, 120, 10, 80))
             pygame.draw.rect(self.image, col, (10, 130, 80, 10))
             pygame.draw.rect(self.image, col, (15, 110, 70, 8))
+
     def update(self):
         self.x -= self.speed
         return self.x > -150
+
     def draw(self, surf):
         surf.blit(self.image, (int(self.x), self.ground_y - 200))
+
 
 # ------------------ GAME ENGINE ------------------
 def spawn_coin_sparkles(particles: List[Particle], x, y):
@@ -489,6 +513,7 @@ def spawn_bullet_smoke(particles: List[Particle], x, y):
         spd = random.uniform(1.0, 2.4)
         particles.append(Particle(x, y, math.cos(ang) * spd, math.sin(ang) * spd, 0.5, (200, 200, 200), 4))
 
+
 class GameEngine:
     def __init__(self, shared: SharedState):
         pygame.init()
@@ -500,7 +525,6 @@ class GameEngine:
         self.shared = shared
         self.ground_y = Config.SCREEN_H - Config.GROUND_H
 
-        # 背景漸層
         self.bg_gradient = create_gradient_surface(Config.SCREEN_W, Config.SCREEN_H, Config.COLOR_SKY_TOP, Config.COLOR_SKY_BOT)
 
         self._init_parallax_layers()
@@ -513,6 +537,7 @@ class GameEngine:
         self.particles: List[Particle] = []
 
         self.reset_game()
+        self._paused_from = "PLAYING"
 
     def _init_parallax_layers(self):
         def gen_far_mountain():
@@ -528,6 +553,7 @@ class GameEngine:
             y = random.randint(50, 200)
             return {"surf": s, "y": y, "w": sz * 3}
         self.layer_mid = ParallaxLayer(0.5, Config.SCREEN_W, gen_mid_cloud, initial_count=5)
+
         self.silhouettes: List[Silhouette] = []
 
     def reset_game(self):
@@ -545,11 +571,13 @@ class GameEngine:
         self.energy = 0
         self.shield_on = False
         self.shield_until = 0.0
+
         self.start_time = time.time()
         self._last_score_t = time.time()
         self._obs_cd_until = 0.0
         self._coin_cd_until = 0.0
         self._kunai_cd_until = 0.0
+
         self.game_state = "START"
         self.silhouettes = [Silhouette("torii", 600, self.ground_y, Config.SCROLL_SPEED * 0.8)]
 
@@ -557,6 +585,7 @@ class GameEngine:
         self.portal_fx = None
         self._portal_spawn_ts = 0.0
         self._boss_triggered = False
+        self.boss_phase = 0
 
     def difficulty(self):
         return min(3.0, (time.time() - self.start_time) / 28.0)
@@ -626,7 +655,6 @@ class GameEngine:
         self.coins.add(c)
         self.all_sprites.add(c)
 
-    # 原世界：苦無拾取物（預設 5 秒一顆）
     def spawn_kunai_if_needed(self):
         now = time.time()
         if now < self._kunai_cd_until:
@@ -662,18 +690,15 @@ class GameEngine:
             self.energy = min(100, self.energy + Config.COIN_ENERGY_GAIN)
             spawn_coin_sparkles(self.particles, c.rect.centerx, c.rect.centery)
 
-        # 撿到苦無 → 補充庫存（HUD 同步）
         if pygame.sprite.spritecollide(self.player, self.kunai_items, dokill=True):
             self.player.kunai_stack = min(self.player.kunai_max, self.player.kunai_stack + 1)
             self.player.kunai_count = self.player.kunai_stack
 
-        # 苦無打掉障礙
         hits = pygame.sprite.groupcollide(self.bullets, self.obstacles, True, True)
         for _ in hits.values():
             spawn_bullet_smoke(self.particles, self.player.rect.centerx + 100, self.player.rect.centery - 30)
             self.score += 50
 
-        # 障礙與玩家碰撞
         for ob in self.obstacles:
             pbox = self.player.rect.inflate(-8, -8)
             obox = ob.rect.inflate(-4, -4)
@@ -691,7 +716,7 @@ class GameEngine:
                     ob.kill()
                     self.score += 50
                 else:
-                    self.player.hp -= 34
+                    self.player.hp -= 20
                     ob.kill()
                     if self.player.hp <= 0:
                         self.game_state = "GAME_OVER"
@@ -718,11 +743,12 @@ class GameEngine:
             self._update_shield()
             self._handle_collisions()
 
-            # Score gate & Portal
-            if HAS_BOSS and (not self._boss_triggered) and self.score >= 1000:
-                if self.portal_fx is None:
-                    self.portal_fx = PortalFX(Config.SCREEN_W - 120, self.ground_y - 60)
-                    self._portal_spawn_ts = time.time()
+            if HAS_BOSS and (not self._boss_triggered):
+                target_score = getattr(Config, "BOSS_SCORE_STEP", 1000) * (self.boss_phase + 1)
+                if self.boss_phase < getattr(Config, "MAX_BOSS_PHASE", 5) and self.score >= target_score:
+                    if self.portal_fx is None:
+                        self.portal_fx = PortalFX(Config.SCREEN_W - 120, self.ground_y - 60)
+                        self._portal_spawn_ts = time.time()
 
             if self.portal_fx is not None:
                 dx = abs(self.player.rect.centerx - self.portal_fx.x)
@@ -731,53 +757,52 @@ class GameEngine:
                 timeout = (time.time() - self._portal_spawn_ts) > 2.0
                 if near or timeout:
                     self.game_state = "BOSS_ROOM"
-                    # 與 boss_room 共用 bullets 群組，帶入房內由其轉為追蹤苦無
-                    self.boss_room = BossRoom(self.player, self.shared, self.bullets)
+
+                    # 根據 boss_phase 決定進哪個 Boss 房
+                    if self.boss_phase == 0:
+                        self.boss_room = BossRoom(self.player, self.shared, self.bullets)
+                    elif self.boss_phase == 1:
+                        self.boss_room = BossRoom2(self.player, self.shared, self.bullets)
+
                     self.portal_fx = None
                     self._boss_triggered = True
-                    # 不再清空 self.bullets，保留給 boss_room 轉換
 
-            # 對齊 boss_room：把護盾狀態鏡射到 player
+
             self.player.shield_on = self.shield_on
 
         elif self.game_state == "BOSS_ROOM" and HAS_BOSS and self.boss_room:
-            # 玩家在 BOSS_ROOM 也要更新（重力/移動）
             self.player.update(dt, self.ground_y, self.game_state, self.particles)
-
-            # 交由 BossRoom 管理 Boss/火球/追蹤苦無等
             self.boss_room.update(dt)
-
-            # 房內也要更新護盾持續時間
             self._update_shield()
-
-            # 护盾鏡射給 player（供 boss_room 碰撞邏輯判斷）
             self.player.shield_on = self.shield_on
 
-            # 玩家死亡立即結束
             if self.player.hp <= 0:
                 self.game_state = "GAME_OVER"
                 return
 
-            # 打贏 Boss：回血到滿，回到原世界
             if self.boss_room.is_boss_dead():
-                self.player.hp = self.player.max_hp  # 奬勵：HP 全滿
+                self.player.hp = self.player.max_hp
                 self.boss_room = None
                 self.game_state = "PLAYING"
                 self.portal_fx = None
                 self._portal_spawn_ts = 0.0
+                self.boss_phase += 1
                 self._boss_triggered = False
 
     def _draw_ground_pretty(self):
         pygame.draw.rect(self.screen, Config.COLOR_GROUND, (0, self.ground_y, Config.SCREEN_W, Config.GROUND_H))
         pygame.draw.line(self.screen, (150, 205, 255), (0, self.ground_y), (Config.SCREEN_W, self.ground_y), 2)
-        pygame.draw.rect(self.screen, (32, 48, 64), (0, self.ground_y+2, Config.SCREEN_W, 14))
-        t = time.time(); sway = math.sin(t * 3.0) * 2.0; blade_color = (42, 72, 90)
+        pygame.draw.rect(self.screen, (32, 48, 64), (0, self.ground_y + 2, Config.SCREEN_W, 14))
+        t = time.time()
+        sway = math.sin(t * 3.0) * 2.0
+        blade_color = (42, 72, 90)
         for x in range(0, Config.SCREEN_W, 20):
-            base = self.ground_y + 12; h = 10 + (x // 20) % 6
-            px = x + int(sway * ((x//20) % 3 - 1))
-            pygame.draw.polygon(self.screen, blade_color, [(px, base), (px+4, base), (px+2, base - h)])
+            base = self.ground_y + 12
+            h = 10 + (x // 20) % 6
+            px = x + int(sway * ((x // 20) % 3 - 1))
+            pygame.draw.polygon(self.screen, blade_color, [(px, base), (px + 4, base), (px + 2, base - h)])
         for i in range(2):
-            y = self.ground_y + 18 + i*10
+            y = self.ground_y + 18 + i * 10
             pygame.draw.line(self.screen, (36, 54, 66), (0, y), (Config.SCREEN_W, y), 2)
 
     def _draw_background_world(self):
@@ -787,20 +812,22 @@ class GameEngine:
         pygame.draw.circle(halo, (150, 40, 40, 40), (60, 60), 60)
         self.screen.blit(halo, (mx - 60, my - 60), special_flags=pygame.BLEND_ADD)
         pygame.draw.circle(self.screen, (200, 55, 55), (mx, my), 30)
+
         self.layer_far.draw(self.screen)
         self.layer_mid.draw(self.screen)
+
         for s in list(self.silhouettes):
             if not s.update():
                 self.silhouettes.remove(s)
             else:
                 s.draw(self.screen)
+
         self._draw_ground_pretty()
 
     def _draw_hud(self):
         t = self.font.render(f"Score: {int(self.score)}", True, Config.COLOR_TEXT)
         self.screen.blit(t, (Config.SCREEN_W - t.get_width() - 14, 10))
 
-        # Chakra 能量條
         BAR_W, BAR_H = 200, 18
         BX, BY = 14, 12
         lbl = self.font.render("Chakra", True, (200, 200, 220))
@@ -810,7 +837,6 @@ class GameEngine:
         fill_w = int(BAR_W * (self.energy / 100.0))
         pygame.draw.rect(self.screen, (100, 200, 255), (BX + 2, frame_y + 2, max(0, fill_w - 2), BAR_H - 3))
 
-        # HP（顯示鎖 0）
         HP_W, HP_H = 200, 14
         HX, HY = 14, frame_y + BAR_H + 10
         pygame.draw.rect(self.screen, (60, 60, 70), (HX, HY, HP_W, HP_H), 2, border_radius=4)
@@ -820,7 +846,6 @@ class GameEngine:
         hp_txt = self.font.render(f"HP {max(0, self.player.hp)}/{self.player.max_hp}", True, (210, 220, 210))
         self.screen.blit(hp_txt, (HX + HP_W + 10, HY - 6))
 
-        # Score bar（1000 分循環一次）
         SCORE_W, SCORE_H = 200, 12
         SX, SY = 14, HY + HP_H + 10
         pygame.draw.rect(self.screen, (60, 60, 70), (SX, SY, SCORE_W, SCORE_H), 2, border_radius=4)
@@ -830,11 +855,9 @@ class GameEngine:
         score_txt = self.font.render(f"Score {int(self.score)}", True, (255, 235, 200))
         self.screen.blit(score_txt, (SX + SCORE_W + 10, SY - 6))
 
-        # Kunai 堆疊顯示
         k_text = self.font.render(f"Kunai x {self.player.kunai_stack}/{getattr(Config, 'KUNAI_MAX_STACK', 10)}", True, (220, 220, 240))
         self.screen.blit(k_text, (14, SY + SCORE_H + 8))
 
-        # FPS
         fps_text = self.font.render(f"FPS: {self.clock.get_fps():.1f}", True, Config.COLOR_TEXT)
         self.screen.blit(fps_text, (Config.SCREEN_W - fps_text.get_width() - 14, 36))
 
@@ -850,12 +873,9 @@ class GameEngine:
         self.screen.blit(halo, (px - radius - 5, py - radius - 5), special_flags=pygame.BLEND_ADD)
 
     def draw(self):
-        # 依場景分支繪製，解決玩家被宮殿背景蓋住問題
         if self.game_state == "BOSS_ROOM" and HAS_BOSS and self.boss_room:
-            # 由 boss_room 自行繪製宮殿、Boss、火球、房內粒子與 Boss HP
             self.boss_room.draw(self.screen)
         else:
-            # 原世界背景與物件
             self._draw_background_world()
             for o in self.obstacles: o.draw(self.screen)
             for c in self.coins: c.draw(self.screen)
@@ -863,17 +883,14 @@ class GameEngine:
             if getattr(self, "portal_fx", None):
                 self.portal_fx.draw(self.screen)
 
-        # 子彈（包含外界與房內的苦無；房內為同一 bullets 群組）
         for b in self.bullets:
             if hasattr(b, "draw"):
                 b.draw(self.screen)
             else:
                 pygame.draw.rect(self.screen, (255, 255, 255), b.rect)
 
-        # 玩家永遠畫在最上層（Boss/背景之上）
         self.player.draw_ninja(self.screen)
 
-        # 原世界粒子（房內粒子由 boss_room.draw 繪製）
         for p in self.particles:
             p.draw(self.screen)
 
@@ -886,10 +903,18 @@ class GameEngine:
             self.screen.blit(overlay, (0, 0))
             t = self.big_font.render("Fist to START", True, (255, 255, 255))
             self.screen.blit(t, t.get_rect(center=(Config.SCREEN_W / 2, Config.SCREEN_H / 2)))
+
         elif self.game_state == "PAUSED":
+            overlay = pygame.Surface((Config.SCREEN_W, Config.SCREEN_H), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 120))
+            self.screen.blit(overlay, (0, 0))
             t = self.big_font.render("PAUSED", True, (255, 255, 255))
             self.screen.blit(t, t.get_rect(center=(Config.SCREEN_W / 2, Config.SCREEN_H / 2)))
+
         elif self.game_state == "GAME_OVER":
+            overlay = pygame.Surface((Config.SCREEN_W, Config.SCREEN_H), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 140))
+            self.screen.blit(overlay, (0, 0))
             t1 = self.big_font.render(f"GAME OVER: {int(self.score)}", True, (255, 100, 100))
             t2 = self.big_font.render("ThumbUp to RESTART", True, (220, 220, 220))
             self.screen.blit(t1, t1.get_rect(center=(Config.SCREEN_W / 2, Config.SCREEN_H / 2 - 24)))
@@ -897,15 +922,18 @@ class GameEngine:
 
         pygame.display.flip()
 
+    # ✅ 這裡是你最需要的：完整修好的狀態機 run()
     def run(self):
         while self.shared.is_running():
             dt = self.clock.tick(Config.GAME_FPS)
+
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
                     self.shared.set_running(False)
 
             action = self.poll_gesture_action()
 
+            # ---------- STATE MACHINE ----------
             if self.game_state == "START":
                 if action == "START_GAME":
                     self.game_state = "PLAYING"
@@ -914,11 +942,11 @@ class GameEngine:
 
             elif self.game_state == "PLAYING":
                 if action == "PAUSE_TOGGLE":
+                    self._paused_from = "PLAYING"
                     self.game_state = "PAUSED"
                 elif action == "JUMP":
                     self.player.jump()
                 elif action == "SHOOT":
-                    # 一律丟苦無
                     self.player.shoot_kunai(self.bullets, self.all_sprites)
                 elif action == "ULTI":
                     if (not self.shield_on) and self.energy >= 100:
@@ -926,43 +954,65 @@ class GameEngine:
                         self.shield_until = time.time() + float(getattr(Config, "ULTI_DURATION", 10.0))
                         self.energy = 0
 
+            elif self.game_state == "BOSS_ROOM" and HAS_BOSS and self.boss_room:
+                if action == "PAUSE_TOGGLE":
+                    self._paused_from = "BOSS_ROOM"
+                    self.game_state = "PAUSED"
+                elif action == "JUMP":
+                    self.player.jump()
+                elif action == "SHOOT":
+                    self.player.shoot_kunai(self.boss_room.bullets, None)
+                elif action == "ULTI":
+                    if (not self.shield_on) and self.energy >= 100:
+                        self.shield_on = True
+                        dur = float(getattr(Config, "BOSS_ULTI_DURATION", getattr(Config, "ULTI_DURATION", 10.0)))
+                        self.shield_until = time.time() + dur
+                        self.energy = 0
+
             elif self.game_state == "PAUSED":
                 if action == "PAUSE_TOGGLE":
-                    self.game_state = "PLAYING"
-
-            elif self.game_state == "BOSS_ROOM" and HAS_BOSS and self.boss_room:
-                # 在房內也可以跳、丟苦無、開盾
-                if action in ("JUMP", "SHOOT", "ULTI"):
-                    if action == "JUMP":
-                        self.player.jump()
-                    elif action == "SHOOT":
-                        # 房內手動丟苦無也可，boss_room 會把直線苦無轉成追蹤
-                        self.player.shoot_kunai(self.boss_room.bullets, None)
-                    elif action == "ULTI":
-                        if (not self.shield_on) and self.energy >= 100:
-                            self.shield_on = True
-                            # ★ Boss 房用自己的大招持續時間
-                            dur = float(getattr(
-                                Config,
-                                "BOSS_ULTI_DURATION",
-                                getattr(Config, "ULTI_DURATION", 10.0)
-                            ))
-                            self.shield_until = time.time() + dur
-                            self.energy = 0
+                    self.game_state = self._paused_from
+                    self._paused_from = "PLAYING"
 
             elif self.game_state == "GAME_OVER":
-                if action == "RESTART":
+                # 你原本用 RESTART，但 mapping 沒有這個，所以改成 ThumbUp / Fist 都能重開
+                if action in ("START_GAME", "PAUSE_TOGGLE"):
                     self.reset_game()
 
-            # 每幀更新與繪製
-            self.update(dt)
+            # ---------- PER-FRAME UPDATE/DRAW ----------
+            if self.game_state != "PAUSED":
+                self.update(dt)
             self.draw()
 
+            # ---------- CAMERA DEBUG WINDOW ----------
+            cam = self.shared.get_camera_view()
+            if cam is not None:
+                frame = cam["frame"]
+                fps = cam["fps"]
+                raw = cam["raw_gestures"]
+                cv2.putText(frame, f"CamFPS:{fps:.1f}", (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.putText(frame, f"L:{raw['Left']}  R:{raw['Right']}", (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+                recog = self.shared.get_recognizer_ref()
+                if recog is not None:
+                    n, cur_g, correct, acc = recog.get_acc()
+                    cv2.putText(frame, f"Acc({cur_g}): {acc:.1f}% ({correct}/{n})", (10, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+                small = cv2.resize(frame, (frame.shape[1] // 2, frame.shape[0] // 2))
+                cv2.imshow("GestiX Camera (Debug)", small)
+
+                # ESC 退出：一定要在 while 外統一 quit
+                if cv2.waitKey(1) & 0xFF == 27:
+                    self.shared.set_running(False)
+
         pygame.quit()
+        cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     shared = SharedState()
     t = Thread(target=camera_thread, args=(shared,), daemon=True)
     t.start()
+
+    run_intro(shared)
     GameEngine(shared).run()
     t.join()
