@@ -84,11 +84,11 @@ class Config:
         "Fist": "START_GAME",
         "Open": "JUMP",
         "Point1": "PAUSE_TOGGLE",
-        "Gun": "SHOOT",        # 名稱還叫 Gun，但 runner2 一律當「丟苦無」
+        "Gun": "SHOOT",
         "ThumbUp": "RESTART",
         "Victory": "JUMP",
-        "OK": "NONE",          # 不觸發遊戲動作（可當校正用）
-        "DualOpen": "ULTI",    # 開護盾
+        "OK": "NONE",
+        "DualOpen": "ULTI",
     }
 
     # 這些手勢被讀一次後就會「消耗」，避免連續觸發（Fist 保持不消耗，當作狀態）
@@ -359,6 +359,23 @@ class HandGestureRecognizer:
         n = len(self.accuracy_win)
         #correct = sum(1 for g in self.vote if g == current)
         correct =sum(1 for g in self.accuracy_win if g == current)
+        acc = (correct / n * 100.0) if n > 0 else None
+        return n, current, correct, acc   
+
+    def get_acc(self):
+        """
+        根據最近 self.vote 計算「目前手勢的穩定度」：
+        - current: 最新一幀的投票結果（self.vote[-1]）
+        - n: 視窗內總幀數
+        - correct: 其中有幾幀跟 current 一樣
+        - acc: 百分比（n > 0 時才有值） correct / n
+        """
+        if not self.vote:
+            return 0, "None", 0, None
+
+        current = self.vote[-1]         
+        n = len(self.vote)
+        correct = sum(1 for g in self.vote if g == current)
         acc = (correct / n * 100.0) if n > 0 else None
         return n, current, correct, acc   
 

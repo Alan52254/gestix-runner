@@ -34,7 +34,7 @@ class Boss(pygame.sprite.Sprite):
         super().__init__()
         self.ground_y = ground_y
         self.rect = pygame.Rect(x, ground_y - 280, 160, 160)
-        self.hp_max = 200
+        self.hp_max = 140
         self.hp = self.hp_max
         self._float_t = 0.0
         self._shot_cd = 0.0
@@ -267,7 +267,7 @@ class BossRoom:
         # 撿到回血補包：+33 HP，最多到 max_hp
         for _ in pygame.sprite.spritecollide(self.player, self.heal_packs, dokill=True):
             max_hp = getattr(self.player, "max_hp", 100)
-            self.player.hp = min(max_hp, self.player.hp + 33)
+            self.player.hp = min(max_hp, self.player.hp + 25)
             for _i in range(8):
                 self.particles.append(Particle(
                     self.player.rect.centerx,
@@ -289,7 +289,7 @@ class BossRoom:
             if fb.rect.colliderect(self.player.rect.inflate(-6, -6)):
                 fb.kill()
                 if not getattr(self.player, "shield_on", False):
-                    self.player.hp -= 33
+                    self.player.hp -= 25
 
         # 下限保護（死亡由外層 runner2 判斷）
         self.player.hp = max(self.player.hp, -9999)
