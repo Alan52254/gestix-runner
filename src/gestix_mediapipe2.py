@@ -361,24 +361,7 @@ class HandGestureRecognizer:
         correct =sum(1 for g in self.accuracy_win if g == current)
         acc = (correct / n * 100.0) if n > 0 else None
         return n, current, correct, acc   
-
-    def get_acc(self):
-        """
-        根據最近 self.vote 計算「目前手勢的穩定度」：
-        - current: 最新一幀的投票結果（self.vote[-1]）
-        - n: 視窗內總幀數
-        - correct: 其中有幾幀跟 current 一樣
-        - acc: 百分比（n > 0 時才有值） correct / n
-        """
-        if not self.vote:
-            return 0, "None", 0, None
-
-        current = self.vote[-1]         
-        n = len(self.vote)
-        correct = sum(1 for g in self.vote if g == current)
-        acc = (correct / n * 100.0) if n > 0 else None
-        return n, current, correct, acc   
-
+    
     def close(self):
         self.hands.close()
 
