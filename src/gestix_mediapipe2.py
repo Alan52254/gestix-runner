@@ -307,10 +307,10 @@ class HandGestureRecognizer:
         # 投票（穩定手勢）
         self.vote.append(final_gesture)
         voted = max(set(self.vote), key=self.vote.count) if self.vote else "None"
-
+        self.accuracy_win.append(voted)
         # Validation window（若有設定 expected_for_eval，就計算準確率）
-        if self.expected_for_eval is not None:
-            self.accuracy_win.append(1 if voted == self.expected_for_eval else 0)
+        # if self.expected_for_eval is not None:
+        #     self.accuracy_win.append(1 if voted == self.expected_for_eval else 0)
 
         return voted, raw_g, draw_lms, landmarks_data
 
@@ -340,7 +340,8 @@ class HandGestureRecognizer:
         n = len(self.accuracy_win)
         c = sum(self.accuracy_win)
         acc = (c / n * 100.0) if n >= self.accuracy_win.maxlen and n > 0 else None
-        return n, c, acc
+        current = self.vote[-1]  
+        return  n, current, c, acc   
 
     def get_acc(self):
         """
@@ -353,9 +354,11 @@ class HandGestureRecognizer:
         if not self.vote:
             return 0, "None", 0, None
 
-        current = self.vote[-1]         
-        n = len(self.vote)
-        correct = sum(1 for g in self.vote if g == current)
+        current = self.vote[-1]       
+        #n = len(self.vote)
+        n = len(self.accuracy_win)
+        #correct = sum(1 for g in self.vote if g == current)
+        correct =sum(1 for g in self.accuracy_win if g == current)
         acc = (correct / n * 100.0) if n > 0 else None
         return n, current, correct, acc   
 
