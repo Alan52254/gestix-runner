@@ -71,7 +71,7 @@ def _ensure_config_defaults():
             "Open": "JUMP",
             "Point1": "PAUSE_TOGGLE",
             "Gun": "SHOOT",
-            "ThumbUp": "PAUSE_TOGGLE",   # ★ ThumbUp 也能暫停/繼續
+            "ThumbUp": "RESTART",   # ★ ThumbUp 也能暫停/繼續
             "Victory": "JUMP",
             "OK": "NONE",
             "DualOpen": "ULTI",
@@ -922,7 +922,6 @@ class GameEngine:
 
         pygame.display.flip()
 
-    # ✅ 這裡是你最需要的：完整修好的狀態機 run()
     def run(self):
         while self.shared.is_running():
             dt = self.clock.tick(Config.GAME_FPS)
@@ -975,8 +974,7 @@ class GameEngine:
                     self._paused_from = "PLAYING"
 
             elif self.game_state == "GAME_OVER":
-                # 你原本用 RESTART，但 mapping 沒有這個，所以改成 ThumbUp / Fist 都能重開
-                if action in ("START_GAME", "PAUSE_TOGGLE"):
+                if action in ("RESTART"):
                     self.reset_game()
 
             # ---------- PER-FRAME UPDATE/DRAW ----------

@@ -111,6 +111,7 @@ class IntroScreen:
         self.current_page = 0
         self.last_advance_time = 0.0
         self.last_gesture = None
+        self.ok_hold = 0
 
     # Simple ninja silhouette decoration
     def _draw_ninja_silhouette(self, surf):
@@ -193,7 +194,7 @@ class IntroScreen:
         gesture = self.shared.get_gesture() if hasattr(self.shared, "get_gesture") else None
         now = time.time()
 
-        if gesture == "ThumbUp" and self.last_gesture != "ThumbUp" and now - self.last_advance_time > 0.5:
+        if gesture == "OK"  and now - self.last_advance_time > 0.5:  #and self.last_gesture != "OK"
             should_next = True
             self.last_advance_time = now
 

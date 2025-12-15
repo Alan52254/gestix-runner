@@ -227,25 +227,24 @@ class HandGestureRecognizer:
             fingers[i] = 1 if lms[self.tip_ids[i]].y < lms[self.tip_ids[i] - 2].y else 0
         return fingers
 
+    def _is_point1(self, fingers):
+
+        return fingers[1] == 1 and fingers[2] == 0 and fingers[3] == 0 and fingers[4] == 0 
+    
     def _is_gun(self, fingers):
         # 食指伸出，其他(中環小)收起；拇指可自由
-        return fingers[1] == 1 and (fingers[2] + fingers[3] + fingers[4]) == 0
+        return fingers[0] == 1 and fingers[1] == 1 and (fingers[2] + fingers[3] + fingers[4]) == 0
 
     def _is_ok(self, lms, handedness):
         base = self._dist2d((lms[0].x, lms[0].y), (lms[9].x, lms[9].y)) + 1e-6
         d48 = self._dist2d((lms[4].x, lms[4].y), (lms[8].x, lms[8].y)) / base
         fingers = self._get_finger_status(lms, handedness)
-        return d48 < 0.35 and fingers[1] == 1 and sum(fingers[2:]) <= 1
+        #return d48 < 0.35 and fingers[1] == 1 and sum(fingers[2:]) <= 1
+        return d48 < 0.5 and fingers[1] == 1
 
     def _is_victory(self, fingers):
         # ✌：食指 + 中指
         return fingers[1] == 1 and fingers[2] == 1 and fingers[3] == 0 and fingers[4] == 0
-
-    def _is_point1(self, fingers):
-        """
-        比 1：只有食指伸直，其它四指收起（允許拇指半開）
-        """
-        return fingers[1] == 1 and fingers[2] == 0 and fingers[3] == 0 and fingers[4] == 0
 
     def _single_hand_gesture(self, lms, handedness: str):
         fingers = self._get_finger_status(lms, handedness)
@@ -254,10 +253,10 @@ class HandGestureRecognizer:
             return "OK"
         if self._is_victory(fingers):
             return "Victory"
-        if self._is_gun(fingers):
-            return "Gun"
         if self._is_point1(fingers):
             return "Point1"
+        if self._is_gun(fingers):
+            return "Gun"
         if fingers == [1, 0, 0, 0, 0]:
             return "ThumbUp"
         if fingers == [0, 0, 0, 0, 0]:
