@@ -22,6 +22,7 @@ from typing import Optional, Tuple, List
 import os
 from gestix_mediapipe2 import SharedState, Config, camera_thread
 from intro_screen import run_intro  # ★ 新增
+from credits_screen import run_credits  # <--- ★ 新增這一行
 from boss_room2 import BossRoom2
 from boss_room_final import BossRoomFinal
 
@@ -812,6 +813,18 @@ class GameEngine:
                 return
 
             if self.boss_room.is_boss_dead():
+                # 1. 判斷是否為最終 Boss (或是 Boss Phase 已經達到上限)
+                is_final_victory = False
+                if isinstance(self.boss_room, BossRoomFinal):
+                    is_final_victory = True
+                elif self.boss_phase >= getattr(Config, "MAX_BOSS_PHASE", 5): 
+                    # 或者是 phase 次數到了 (根據你原本設定可能是 phase 2 就是 final)
+                    is_final_victory = True
+
+                if is_final_victory:
+                    # ★ 觸發勝利狀態
+                    self.game_state = "VICTORY"
+                    return  # 直接返回，不再執行後續重置邏輯
                 self.player.hp = self.player.max_hp
             
                 self.boss_room = None
@@ -1018,7 +1031,21 @@ class GameEngine:
                 if action == "PAUSE_TOGGLE":
                     self.game_state = self._paused_from
                     self._paused_from = "PLAYING"
+            elif self.game_state == "VICTORY":
+                # 1. 停止所有音樂
+                if pygame.mixer.get_init():
+                    pygame.mixer.music.stop()
+                
+                # 2. 執行片尾動畫 (這是 Blocking 的，會等到動畫播完才回來)
+                run_credits(self.shared)
 
+                # 3. 動畫結束後的動作
+                # 選擇 A: 直接結束程式
+                # self.shared.set_running(False)
+                
+                # 選擇 B: 回到標題畫面 (建議選項，體驗較好)
+                self.reset_game()
+                self.game_state = "START"
             elif self.game_state == "GAME_OVER":
                 if pygame.mixer.get_init():
                     pygame.mixer.music.stop()
@@ -1026,7 +1053,7 @@ class GameEngine:
                 if action in ("RESTART", "START_GAME"):
                     self.reset_game()
                     self.play_bgm("runnerbgm.mp3")
-
+                
 
             # ---------- PER-FRAME UPDATE/DRAW ----------
             if self.game_state != "PAUSED":
