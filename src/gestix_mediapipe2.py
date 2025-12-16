@@ -86,17 +86,16 @@ class Config:
         "Point1": "PAUSE_TOGGLE",
         "Gun": "SHOOT",
         "ThumbUp": "RESTART",
-        "Victory": "JUMP",
-        "OK": "NONE",
+        "Victory": "OK",
+        "OK": "None",
         "DualOpen": "ULTI",
+           # ★ Victory 改成最終大招
     }
 
     # 這些手勢被讀一次後就會「消耗」，避免連續觸發（Fist 保持不消耗，當作狀態）
     CONSUME_GESTURES = {
         "Open",
         "Gun",
-        "OK",
-        "Victory",
         "ThumbUp",
         "DualOpen",
         "Point1",
@@ -239,12 +238,24 @@ class HandGestureRecognizer:
         base = self._dist2d((lms[0].x, lms[0].y), (lms[9].x, lms[9].y)) + 1e-6
         d48 = self._dist2d((lms[4].x, lms[4].y), (lms[8].x, lms[8].y)) / base
         fingers = self._get_finger_status(lms, handedness)
-        #return d48 < 0.35 and fingers[1] == 1 and sum(fingers[2:]) <= 1
-        return d48 < 0.5 and fingers[1] == 1
+
+        # OK：拇指尖(4)和食指尖(8)接近，且中指/無名指/小指收起
+        return (
+            d48 < 0.35 and
+            fingers[1] == 1 and
+            fingers[2] == 0 and
+            fingers[3] == 0 and
+            fingers[4] == 0
+        )
 
     def _is_victory(self, fingers):
-        # ✌：食指 + 中指
-        return fingers[1] == 1 and fingers[2] == 1 and fingers[3] == 0 and fingers[4] == 0
+        # ✌：食指 + 中指，其餘收起（拇指可自由）
+        return (
+            fingers[1] == 1 and
+            fingers[2] == 1 and
+            fingers[3] == 0 and
+            fingers[4] == 0
+        )
 
     def _single_hand_gesture(self, lms, handedness: str):
         fingers = self._get_finger_status(lms, handedness)

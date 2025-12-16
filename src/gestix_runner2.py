@@ -19,10 +19,13 @@ import pygame, random, time, math, cv2
 from collections import deque
 from threading import Thread
 from typing import Optional, Tuple, List
-
+import os
 from gestix_mediapipe2 import SharedState, Config, camera_thread
 from intro_screen import run_intro  # ★ 新增
+from credits_screen import run_credits  # <--- ★ 新增這一行
 from boss_room2 import BossRoom2
+from boss_room_final import BossRoomFinal
+
 try:
     from boss_room import BossRoom
     HAS_BOSS = True
@@ -73,7 +76,7 @@ def _ensure_config_defaults():
             "Gun": "SHOOT",
             "ThumbUp": "RESTART",   # ★ ThumbUp 也能暫停/繼續
             "Victory": "JUMP",
-            "OK": "NONE",
+            "OK": "OK",
             "DualOpen": "ULTI",
         },
         # 玩家 HP
@@ -524,9 +527,12 @@ class GameEngine:
         self.big_font = pygame.font.SysFont("arial", 52, bold=True)
         self.shared = shared
         self.ground_y = Config.SCREEN_H - Config.GROUND_H
-
+        self.current_bgm = None
         self.bg_gradient = create_gradient_surface(Config.SCREEN_W, Config.SCREEN_H, Config.COLOR_SKY_TOP, Config.COLOR_SKY_BOT)
-
+        # -------------------------------------------------
+        # ★ [新增] 音樂設定：載入並循環播放
+        # -------------------------------------------------
+        # -------------------------------------------------
         self._init_parallax_layers()
 
         self.all_sprites = pygame.sprite.Group()
@@ -538,6 +544,18 @@ class GameEngine:
 
         self.reset_game()
         self._paused_from = "PLAYING"
+    def play_bgm(self, path, loop=True):
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.set_volume(0.5)
+            pygame.mixer.music.play(-1 if loop else 0)
+            self.current_bgm = path
+        except Exception as e:
+            print("[BGM ERROR]", e)
 
     def _init_parallax_layers(self):
         def gen_far_mountain():
@@ -566,6 +584,8 @@ class GameEngine:
 
         self.player = Player(140, self.ground_y)
         self.all_sprites.add(self.player)
+        self.player.energy = 0
+
 
         self.score = 0
         self.energy = 0
@@ -763,6 +783,8 @@ class GameEngine:
                         self.boss_room = BossRoom(self.player, self.shared, self.bullets)
                     elif self.boss_phase == 1:
                         self.boss_room = BossRoom2(self.player, self.shared, self.bullets)
+                    elif self.boss_phase == 2:
+                        self.boss_room = BossRoomFinal(self.player, self.shared, self.bullets)
 
                     self.portal_fx = None
                     self._boss_triggered = True
@@ -771,23 +793,47 @@ class GameEngine:
             self.player.shield_on = self.shield_on
 
         elif self.game_state == "BOSS_ROOM" and HAS_BOSS and self.boss_room:
+    # 進 boss_room 前先把 runner 能量帶進去
+            if not hasattr(self.player, "energy"):
+                self.player.energy = 0
+            self.player.energy = self.energy
+
             self.player.update(dt, self.ground_y, self.game_state, self.particles)
             self.boss_room.update(dt)
+
+    # boss_room 內部撿能量球會改 player.energy，回寫回 runner HUD/盾
+            self.energy = int(getattr(self.player, "energy", self.energy))
+
             self._update_shield()
             self.player.shield_on = self.shield_on
+
 
             if self.player.hp <= 0:
                 self.game_state = "GAME_OVER"
                 return
 
             if self.boss_room.is_boss_dead():
+                # 1. 判斷是否為最終 Boss (或是 Boss Phase 已經達到上限)
+                is_final_victory = False
+                if isinstance(self.boss_room, BossRoomFinal):
+                    is_final_victory = True
+                elif self.boss_phase >= getattr(Config, "MAX_BOSS_PHASE", 5): 
+                    # 或者是 phase 次數到了 (根據你原本設定可能是 phase 2 就是 final)
+                    is_final_victory = True
+
+                if is_final_victory:
+                    # ★ 觸發勝利狀態
+                    self.game_state = "VICTORY"
+                    return  # 直接返回，不再執行後續重置邏輯
                 self.player.hp = self.player.max_hp
+            
                 self.boss_room = None
                 self.game_state = "PLAYING"
                 self.portal_fx = None
                 self._portal_spawn_ts = 0.0
                 self.boss_phase += 1
                 self._boss_triggered = False
+
 
     def _draw_ground_pretty(self):
         pygame.draw.rect(self.screen, Config.COLOR_GROUND, (0, self.ground_y, Config.SCREEN_W, Config.GROUND_H))
@@ -919,7 +965,7 @@ class GameEngine:
             t2 = self.big_font.render("ThumbUp to RESTART", True, (220, 220, 220))
             self.screen.blit(t1, t1.get_rect(center=(Config.SCREEN_W / 2, Config.SCREEN_H / 2 - 24)))
             self.screen.blit(t2, t2.get_rect(center=(Config.SCREEN_W / 2, Config.SCREEN_H / 2 + 32)))
-
+            
         pygame.display.flip()
 
     def run(self):
@@ -938,6 +984,7 @@ class GameEngine:
                     self.game_state = "PLAYING"
                     self.start_time = time.time()
                     self._last_score_t = time.time()
+                    self.play_bgm("runnerbgm.mp3")
 
             elif self.game_state == "PLAYING":
                 if action == "PAUSE_TOGGLE":
@@ -954,28 +1001,58 @@ class GameEngine:
                         self.energy = 0
 
             elif self.game_state == "BOSS_ROOM" and HAS_BOSS and self.boss_room:
+                if isinstance(self.boss_room, BossRoomFinal):
+                    if not getattr(self, "_playing_final_bgm", False):
+                        if os.path.exists("bgm_final.mp3"): # 確保你有這個檔案
+                            try:
+                                self.play_bgm("bgm_final.mp3")
+                                self._playing_final_bgm = True
+                            except: pass
                 if action == "PAUSE_TOGGLE":
                     self._paused_from = "BOSS_ROOM"
                     self.game_state = "PAUSED"
                 elif action == "JUMP":
                     self.player.jump()
                 elif action == "SHOOT":
-                    self.player.shoot_kunai(self.boss_room.bullets, None)
+                    self.player.shoot_kunai(self.bullets, None)
                 elif action == "ULTI":
                     if (not self.shield_on) and self.energy >= 100:
                         self.shield_on = True
                         dur = float(getattr(Config, "BOSS_ULTI_DURATION", getattr(Config, "ULTI_DURATION", 10.0)))
                         self.shield_until = time.time() + dur
                         self.energy = 0
+                elif action == "OK":
+                    if isinstance(self.boss_room, BossRoomFinal):
+                         self.boss_room.cast_final_ulti()
+
 
             elif self.game_state == "PAUSED":
                 if action == "PAUSE_TOGGLE":
                     self.game_state = self._paused_from
                     self._paused_from = "PLAYING"
+            elif self.game_state == "VICTORY":
+                # 1. 停止所有音樂
+                if pygame.mixer.get_init():
+                    pygame.mixer.music.stop()
+                
+                # 2. 執行片尾動畫 (這是 Blocking 的，會等到動畫播完才回來)
+                run_credits(self.shared)
 
+                # 3. 動畫結束後的動作
+                # 選擇 A: 直接結束程式
+                # self.shared.set_running(False)
+                
+                # 選擇 B: 回到標題畫面 (建議選項，體驗較好)
+                self.reset_game()
+                self.game_state = "START"
             elif self.game_state == "GAME_OVER":
-                if action in ("RESTART"):
+                if pygame.mixer.get_init():
+                    pygame.mixer.music.stop()
+
+                if action in ("RESTART", "START_GAME"):
                     self.reset_game()
+                    self.play_bgm("runnerbgm.mp3")
+                
 
             # ---------- PER-FRAME UPDATE/DRAW ----------
             if self.game_state != "PAUSED":
@@ -993,8 +1070,12 @@ class GameEngine:
                 recog = self.shared.get_recognizer_ref()    #取得目前手勢 算穩定度
                 if recog is not None:
                     n, cur_g, correct, acc = recog.get_acc()
-                    cv2.putText(frame, f"Acc({cur_g}): {acc:.1f}% ({correct}/{n})", (10, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
-                small = cv2.resize(frame, (frame.shape[1]//2, frame.shape[0]//2))
+                    acc_txt = "N/A" if acc is None else f"{acc:.1f}%"
+                    cv2.putText(frame, f"Acc({cur_g}): {acc_txt} ({correct}/{n})", (10, 84),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+
+                small = cv2.resize(frame, (frame.shape[1] // 2, frame.shape[0] // 2))
                 cv2.imshow("GestiX Camera (Debug)", small)
                 if cv2.waitKey(1) & 0xFF == 27:
                     self.shared.set_running(False)
