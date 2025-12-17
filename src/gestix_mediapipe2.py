@@ -83,7 +83,7 @@ class Config:
     GESTURE_MAPPING = {
         "Fist": "START_GAME",
         "Open": "JUMP",
-        "Point1": "PAUSE_TOGGLE",
+        "Point1": "NONE",
         "Gun": "SHOOT",
         "ThumbUp": "RESTART",
         "Victory": "OK",
@@ -225,10 +225,6 @@ class HandGestureRecognizer:
         for i in range(1, 5):
             fingers[i] = 1 if lms[self.tip_ids[i]].y < lms[self.tip_ids[i] - 2].y else 0
         return fingers
-
-    def _is_point1(self, fingers):
-
-        return fingers[1] == 1 and fingers[2] == 0 and fingers[3] == 0 and fingers[4] == 0 
     
     def _is_gun(self, fingers):
         # 食指伸出，其他(中環小)收起；拇指可自由
@@ -247,6 +243,9 @@ class HandGestureRecognizer:
             fingers[3] == 0 and
             fingers[4] == 0
         )
+    def _is_point1(self, fingers):
+
+        return fingers[1] == 1 and fingers[2] == 0 and fingers[3] == 0 and fingers[4] == 0 
 
     def _is_victory(self, fingers):
         # ✌：食指 + 中指，其餘收起（拇指可自由）
@@ -264,16 +263,17 @@ class HandGestureRecognizer:
             return "OK"
         if self._is_victory(fingers):
             return "Victory"
-        if self._is_point1(fingers):
-            return "Point1"
         if self._is_gun(fingers):
             return "Gun"
+        if self._is_point1(fingers):
+            return "Point1"
         if fingers == [1, 0, 0, 0, 0]:
             return "ThumbUp"
         if fingers == [0, 0, 0, 0, 0]:
             return "Fist"
         if fingers == [1, 1, 1, 1, 1]:
             return "Open"
+        
         return "None"
 
     def recognize(self, frame_rgb):

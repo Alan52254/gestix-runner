@@ -72,7 +72,7 @@ def _ensure_config_defaults():
         GESTURE_MAPPING={
             "Fist": "START_GAME",
             "Open": "JUMP",
-            "Point1": "PAUSE_TOGGLE",
+            "Point1": "NONE",#PAUSE_TOGGLE
             "Gun": "SHOOT",
             "ThumbUp": "RESTART",   # ★ ThumbUp 也能暫停/繼續
             "Victory": "JUMP",
@@ -545,6 +545,8 @@ class GameEngine:
         self.reset_game()
         self._paused_from = "PLAYING"
     def play_bgm(self, path, loop=True):
+        print("[CWD]", os.getcwd())
+        print("[BGM EXISTS]", path, os.path.exists(path))
         if not pygame.mixer.get_init():
             pygame.mixer.init()
 
@@ -1049,7 +1051,7 @@ class GameEngine:
                 if pygame.mixer.get_init():
                     pygame.mixer.music.stop()
 
-                if action in ("RESTART", "START_GAME"):
+                if action in ("RESTART"):
                     self.reset_game()
                     self.play_bgm("runnerbgm.mp3")
                 

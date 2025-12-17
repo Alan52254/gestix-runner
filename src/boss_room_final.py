@@ -23,7 +23,7 @@ KUNAI_PICKUP_INTERVAL = 2.5
 KUNAI_PICKUP_SPEED = 4.2
 
 # Boss 攻擊參數
-REAPER_SHOT_DMG = 20
+REAPER_SHOT_DMG = 25
 REAPER_SHOT_SPEED = 7.0
 REAPER_SHOT_SIZE = 18
 
@@ -365,7 +365,7 @@ class BossRoomFinal:
         # Mode 1: 扇形擴散
         elif self.attack_mode == 1:
             base_ang = math.atan2(py - cy, px - cx)
-            spread = 0.35
+            spread = 0.5
 
             self._fan_queue = [
             base_ang - spread,

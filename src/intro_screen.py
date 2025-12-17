@@ -194,7 +194,7 @@ class IntroScreen:
         gesture = self.shared.get_gesture() if hasattr(self.shared, "get_gesture") else None
         now = time.time()
 
-        if gesture == "OK"  and now - self.last_advance_time > 0.5:  #and self.last_gesture != "OK"
+        if gesture == "ThumbUp"  and now - self.last_advance_time > 0.5:  #and self.last_gesture != "OK"
             should_next = True
             self.last_advance_time = now
 
